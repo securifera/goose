@@ -40,7 +40,7 @@ pub async fn run() -> Result<()> {
     let secret_key = std::env::var("GOOSE_SERVER__SECRET_KEY")
         .unwrap_or_else(|_| hex::encode(rand::random::<[u8; 32]>()));
 
-    let app_state = state::AppState::new(settings.tls).await?;
+    let app_state = state::AppState::new(settings.tls, settings).await?;
 
     // Share the server secret with the tunnel manager so it uses the same
     // key for forwarded requests, without mutating the process environment.

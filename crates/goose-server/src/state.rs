@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::tunnel::TunnelManager;
+use crate::configuration::Settings;
 use goose::agents::ExtensionLoadResult;
 use goose::gateway::manager::GatewayManager;
 use goose::providers::local_inference::InferenceRuntime;
@@ -26,10 +27,11 @@ pub struct AppState {
     pub gateway_manager: Arc<GatewayManager>,
     pub extension_loading_tasks: ExtensionLoadingTasks,
     pub inference_runtime: Arc<InferenceRuntime>,
+    pub settings: Arc<Settings>,
 }
 
 impl AppState {
-    pub async fn new(tls: bool) -> anyhow::Result<Arc<AppState>> {
+    pub async fn new(tls: bool, settings: Settings) -> anyhow::Result<Arc<AppState>> {
         register_builtin_extensions(goose_mcp::BUILTIN_EXTENSIONS.clone());
 
         let agent_manager = AgentManager::instance().await?;
@@ -44,6 +46,7 @@ impl AppState {
             gateway_manager,
             extension_loading_tasks: Arc::new(Mutex::new(HashMap::new())),
             inference_runtime: InferenceRuntime::get_or_init(),
+            settings: Arc::new(settings),
         }))
     }
 

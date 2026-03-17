@@ -11,6 +11,11 @@ pub struct Settings {
     pub port: u16,
     #[serde(default = "default_tls")]
     pub tls: bool,
+    /// When true, only MCP-over-network extensions (StreamableHttp) are
+    /// accepted. Stdio extensions that spawn local binaries are rejected.
+    /// Set via GOOSE_SERVER__MCP_ONLY=true.
+    #[serde(default)]
+    pub mcp_only: bool,
 }
 
 impl Settings {
@@ -67,6 +72,13 @@ impl Settings {
             }
         }
     }
+}
+
+pub fn is_mcp_only_extension(config: &goose::agents::ExtensionConfig) -> bool {
+    matches!(
+        config,
+        goose::agents::ExtensionConfig::StreamableHttp { .. }
+    )
 }
 
 fn default_host() -> String {

@@ -262,6 +262,28 @@ async fn start_agent(
     let recipe_extensions = original_recipe
         .as_ref()
         .and_then(|r| r.extensions.as_deref());
+
+    // If mcp_only mode is enabled, reject any Stdio or Builtin extensions that
+    // would spawn a local process, in both the recipe and the caller's overrides.
+    if state.settings.mcp_only {
+        let all_candidates = recipe_extensions
+            .unwrap_or(&[])
+            .iter()
+            .chain(extension_overrides.as_deref().unwrap_or(&[]).iter());
+        for cfg in all_candidates {
+            if !crate::configuration::is_mcp_only_extension(cfg) {
+                return Err(ErrorResponse {
+                    message: format!(
+                        "Extension '{}' is not an MCP network extension and the server is \
+                         configured with mcp_only=true",
+                        cfg.name()
+                    ),
+                    status: StatusCode::FORBIDDEN,
+                });
+            }
+        }
+    }
+
     let extensions_to_use =
         resolve_extensions_for_new_session(recipe_extensions, extension_overrides);
 
@@ -679,6 +701,19 @@ async fn agent_add_extension(
     Json(request): Json<AddExtensionRequest>,
 ) -> Result<StatusCode, ErrorResponse> {
     let extension_name = request.config.name();
+
+    // Reject local-process extensions when mcp_only mode is active.
+    if state.settings.mcp_only && !crate::configuration::is_mcp_only_extension(&request.config) {
+        return Err(ErrorResponse {
+            message: format!(
+                "Extension '{}' is not an MCP network extension and the server is \
+                 configured with mcp_only=true",
+                extension_name
+            ),
+            status: StatusCode::FORBIDDEN,
+        });
+    }
+
     let agent = state.get_agent(request.session_id.clone()).await?;
 
     agent
