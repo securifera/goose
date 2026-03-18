@@ -36,11 +36,12 @@ pub async fn run() -> Result<()> {
     crate::logging::setup_logging(Some("goosed"))?;
 
     let settings = configuration::Settings::new()?;
+    let tls = settings.tls;
 
     let secret_key = std::env::var("GOOSE_SERVER__SECRET_KEY")
         .unwrap_or_else(|_| hex::encode(rand::random::<[u8; 32]>()));
 
-    let app_state = state::AppState::new(settings.tls, settings).await?;
+    let app_state = state::AppState::new(tls, settings).await?;
 
     // Share the server secret with the tunnel manager so it uses the same
     // key for forwarded requests, without mutating the process environment.
@@ -61,7 +62,7 @@ pub async fn run() -> Result<()> {
         ))
         .layer(cors);
 
-    let addr = settings.socket_addr();
+    let addr = app_state.settings.socket_addr();
 
     let tunnel_manager = app_state.tunnel_manager.clone();
     tokio::spawn(async move {
@@ -73,7 +74,7 @@ pub async fn run() -> Result<()> {
         gateway_manager.check_auto_start().await;
     });
 
-    if settings.tls {
+    if tls {
         let tls_setup = self_signed_config().await?;
 
         let handle = Handle::new();
