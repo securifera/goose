@@ -670,8 +670,6 @@ export type MessageContent = (TextContent & {
     type: 'redactedThinking';
 }) | (SystemNotificationContent & {
     type: 'systemNotification';
-}) | (ReasoningContent & {
-    type: 'reasoning';
 });
 
 export type MessageEvent = {
@@ -1007,10 +1005,6 @@ export type ReadResourceResponse = {
     mimeType?: string | null;
     text: string;
     uri: string;
-};
-
-export type ReasoningContent = {
-    text: string;
 };
 
 export type Recipe = {
@@ -2660,6 +2654,34 @@ export type ProvidersResponses = {
 };
 
 export type ProvidersResponse2 = ProvidersResponses[keyof ProvidersResponses];
+
+export type CleanupProviderCacheData = {
+    body?: never;
+    path: {
+        /**
+         * Provider name (e.g., githubcopilot)
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/config/providers/{name}/cleanup';
+};
+
+export type CleanupProviderCacheErrors = {
+    /**
+     * Internal server error
+     */
+    500: unknown;
+};
+
+export type CleanupProviderCacheResponses = {
+    /**
+     * Provider cache cleaned up successfully
+     */
+    200: string;
+};
+
+export type CleanupProviderCacheResponse = CleanupProviderCacheResponses[keyof CleanupProviderCacheResponses];
 
 export type GetProviderModelsData = {
     body?: never;
