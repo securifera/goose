@@ -21,9 +21,8 @@ use goose::config::declarative_providers::{
 };
 use goose::conversation::message::{
     ActionRequired, ActionRequiredData, FrontendToolRequest, Message, MessageContent,
-    MessageMetadata, ReasoningContent, RedactedThinkingContent, SystemNotificationContent,
-    SystemNotificationType, ThinkingContent, TokenState, ToolConfirmationRequest, ToolRequest,
-    ToolResponse,
+    MessageMetadata, RedactedThinkingContent, SystemNotificationContent, SystemNotificationType,
+    ThinkingContent, TokenState, ToolConfirmationRequest, ToolRequest, ToolResponse,
 };
 
 use crate::routes::recipe_utils::RecipeManifest;
@@ -409,6 +408,7 @@ derive_utoipa!(Icon as IconSchema);
         super::routes::config_management::remove_custom_provider,
         super::routes::config_management::get_provider_catalog,
         super::routes::config_management::get_provider_catalog_template,
+        super::routes::config_management::cleanup_provider_cache,
         super::routes::config_management::check_provider,
         super::routes::config_management::set_config_provider,
         super::routes::config_management::configure_provider_oauth,
@@ -552,7 +552,6 @@ derive_utoipa!(Icon as IconSchema);
         ActionRequiredData,
         ThinkingContent,
         RedactedThinkingContent,
-        ReasoningContent,
         FrontendToolRequest,
         ResourceContentsSchema,
         SystemNotificationType,
