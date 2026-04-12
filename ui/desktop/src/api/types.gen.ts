@@ -216,6 +216,7 @@ export type DeclarativeProviderConfig = {
     dynamic_models?: boolean | null;
     engine: ProviderEngine;
     env_vars?: Array<EnvVarConfig> | null;
+    fast_model?: string | null;
     headers?: {
         [key: string]: string;
     } | null;
@@ -817,6 +818,7 @@ export type ModelInfoResponse = {
 
 export type ModelSettings = {
     context_size?: number | null;
+    enable_thinking?: boolean;
     flash_attention?: boolean | null;
     frequency_penalty?: number;
     max_output_tokens?: number | null;
@@ -1231,6 +1233,7 @@ export type Session = {
     recipe?: Recipe | null;
     schedule_id?: string | null;
     session_type?: SessionType;
+    thread_id?: string | null;
     total_tokens?: number | null;
     updated_at: string;
     user_recipe_values?: {

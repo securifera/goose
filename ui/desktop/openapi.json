@@ -4,13 +4,13 @@
     "title": "goose-server",
     "description": "An AI agent",
     "contact": {
-      "name": "Block",
+      "name": "AAIF",
       "email": "ai-oss-tools@block.xyz"
     },
     "license": {
       "name": "Apache-2.0"
     },
-    "version": "1.29.0"
+    "version": "1.30.0"
   },
   "paths": {
     "/action-required/tool-confirmation": {
@@ -4618,6 +4618,10 @@
             },
             "nullable": true
           },
+          "fast_model": {
+            "type": "string",
+            "nullable": true
+          },
           "headers": {
             "type": "object",
             "additionalProperties": {
@@ -6482,6 +6486,9 @@
             "nullable": true,
             "minimum": 0
           },
+          "enable_thinking": {
+            "type": "boolean"
+          },
           "flash_attention": {
             "type": "boolean",
             "nullable": true
@@ -7743,6 +7750,10 @@
           },
           "session_type": {
             "$ref": "#/components/schemas/SessionType"
+          },
+          "thread_id": {
+            "type": "string",
+            "nullable": true
           },
           "total_tokens": {
             "type": "integer",

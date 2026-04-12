@@ -7,7 +7,7 @@ import { z } from 'zod';
  */
 export const zAddExtensionRequest = z.object({
     sessionId: z.string(),
-    config: z.unknown()
+    config: z.unknown().optional().default(null)
 });
 
 /**
@@ -30,6 +30,9 @@ export const zGetToolsRequest = z.object({
     sessionId: z.string()
 });
 
+/**
+ * Tools response.
+ */
 export const zGetToolsResponse = z.object({
     tools: z.array(z.unknown())
 });
@@ -43,8 +46,11 @@ export const zReadResourceRequest = z.object({
     extensionName: z.string()
 });
 
+/**
+ * Resource read response.
+ */
 export const zReadResourceResponse = z.object({
-    result: z.unknown()
+    result: z.unknown().optional().default(null)
 });
 
 /**
@@ -56,25 +62,125 @@ export const zUpdateWorkingDirRequest = z.object({
 });
 
 /**
- * Get a session by ID.
- */
-export const zGetSessionRequest = z.object({
-    sessionId: z.string(),
-    includeMessages: z.boolean().optional().default(false)
-});
-
-/**
- * Get a session response.
- */
-export const zGetSessionResponse = z.object({
-    session: z.unknown()
-});
-
-/**
  * Delete a session.
  */
 export const zDeleteSessionRequest = z.object({
     sessionId: z.string()
+});
+
+/**
+ * List configured extensions and any warnings.
+ */
+export const zGetExtensionsRequest = z.record(z.unknown());
+
+/**
+ * List configured extensions and any warnings.
+ */
+export const zGetExtensionsResponse = z.object({
+    extensions: z.array(z.unknown()),
+    warnings: z.array(z.string())
+});
+
+/**
+ * Atomically update the provider for a live session.
+ */
+export const zUpdateProviderRequest = z.object({
+    sessionId: z.string(),
+    provider: z.string(),
+    model: z.union([
+        z.string(),
+        z.null()
+    ]).optional(),
+    contextLimit: z.union([
+        z.number().int().gte(0),
+        z.null()
+    ]).optional(),
+    requestParams: z.union([
+        z.record(z.unknown()),
+        z.null()
+    ]).optional()
+});
+
+/**
+ * Provider update response.
+ */
+export const zUpdateProviderResponse = z.object({
+    configOptions: z.array(z.unknown())
+});
+
+/**
+ * List providers available through goose, including the config-default sentinel.
+ */
+export const zListProvidersRequest = z.record(z.unknown());
+
+export const zProviderListEntry = z.object({
+    id: z.string(),
+    label: z.string()
+});
+
+/**
+ * Provider list response.
+ */
+export const zListProvidersResponse = z.object({
+    providers: z.array(zProviderListEntry)
+});
+
+/**
+ * Read a single non-secret config value.
+ */
+export const zReadConfigRequest = z.object({
+    key: z.string()
+});
+
+/**
+ * Config read response.
+ */
+export const zReadConfigResponse = z.object({
+    value: z.unknown().optional().default(null)
+});
+
+/**
+ * Upsert a single non-secret config value.
+ */
+export const zUpsertConfigRequest = z.object({
+    key: z.string(),
+    value: z.unknown()
+});
+
+/**
+ * Remove a single non-secret config value.
+ */
+export const zRemoveConfigRequest = z.object({
+    key: z.string()
+});
+
+/**
+ * Check whether a secret exists. Never returns the actual value.
+ */
+export const zCheckSecretRequest = z.object({
+    key: z.string()
+});
+
+/**
+ * Secret check response.
+ */
+export const zCheckSecretResponse = z.object({
+    exists: z.boolean()
+});
+
+/**
+ * Set a secret value (write-only).
+ */
+export const zUpsertSecretRequest = z.object({
+    key: z.string(),
+    value: z.unknown()
+});
+
+/**
+ * Remove a secret.
+ */
+export const zRemoveSecretRequest = z.object({
+    key: z.string()
 });
 
 /**
@@ -84,6 +190,9 @@ export const zExportSessionRequest = z.object({
     sessionId: z.string()
 });
 
+/**
+ * Export session response — raw JSON of the goose session with `conversation`.
+ */
 export const zExportSessionResponse = z.object({
     data: z.string()
 });
@@ -95,16 +204,34 @@ export const zImportSessionRequest = z.object({
     data: z.string()
 });
 
+/**
+ * Import session response — metadata about the newly created session.
+ */
 export const zImportSessionResponse = z.object({
-    session: z.unknown()
+    sessionId: z.string(),
+    title: z.union([
+        z.string(),
+        z.null()
+    ]).optional(),
+    updatedAt: z.union([
+        z.string(),
+        z.null()
+    ]).optional(),
+    messageCount: z.number().int().gte(0)
 });
 
 /**
- * List configured extensions and any warnings.
+ * Archive a session (soft delete).
  */
-export const zGetExtensionsResponse = z.object({
-    extensions: z.array(z.unknown()),
-    warnings: z.array(z.string())
+export const zArchiveSessionRequest = z.object({
+    sessionId: z.string()
+});
+
+/**
+ * Unarchive a previously archived session.
+ */
+export const zUnarchiveSessionRequest = z.object({
+    sessionId: z.string()
 });
 
 export const zExtRequest = z.object({
@@ -117,10 +244,20 @@ export const zExtRequest = z.object({
             zGetToolsRequest,
             zReadResourceRequest,
             zUpdateWorkingDirRequest,
-            zGetSessionRequest,
             zDeleteSessionRequest,
+            zGetExtensionsRequest,
+            zUpdateProviderRequest,
+            zListProvidersRequest,
+            zReadConfigRequest,
+            zUpsertConfigRequest,
+            zRemoveConfigRequest,
+            zCheckSecretRequest,
+            zUpsertSecretRequest,
+            zRemoveSecretRequest,
             zExportSessionRequest,
-            zImportSessionRequest
+            zImportSessionRequest,
+            zArchiveSessionRequest,
+            zUnarchiveSessionRequest
         ]),
         z.union([
             z.record(z.unknown()),
@@ -137,10 +274,13 @@ export const zExtResponse = z.union([
                 zEmptyResponse,
                 zGetToolsResponse,
                 zReadResourceResponse,
-                zGetSessionResponse,
+                zGetExtensionsResponse,
+                zUpdateProviderResponse,
+                zListProvidersResponse,
+                zReadConfigResponse,
+                zCheckSecretResponse,
                 zExportSessionResponse,
-                zImportSessionResponse,
-                zGetExtensionsResponse
+                zImportSessionResponse
             ]),
             z.unknown()
         ]).optional()
