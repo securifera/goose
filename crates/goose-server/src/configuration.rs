@@ -11,6 +11,8 @@ pub struct Settings {
     pub port: u16,
     #[serde(default = "default_tls")]
     pub tls: bool,
+    pub tls_cert_path: Option<String>,
+    pub tls_key_path: Option<String>,
     /// When true, only MCP-over-network extensions (StreamableHttp) are
     /// accepted. Stdio extensions that spawn local binaries are rejected.
     /// Set via GOOSE_SERVER__MCP_ONLY=true.
@@ -103,6 +105,9 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 3000,
             tls: true,
+            tls_cert_path: None,
+            tls_key_path: None,
+            mcp_only: false,
         };
         let addr = server_settings.socket_addr();
         assert_eq!(addr.to_string(), "127.0.0.1:3000");

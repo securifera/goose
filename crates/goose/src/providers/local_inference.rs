@@ -3,6 +3,7 @@ mod inference_emulated_tools;
 mod inference_engine;
 mod inference_native_tools;
 pub mod local_model_registry;
+pub(crate) mod multimodal;
 mod tool_parsing;
 
 use inference_emulated_tools::{
@@ -30,6 +31,7 @@ use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{LlamaChatMessage, LlamaChatTemplate, LlamaModel};
 use llama_cpp_2::{list_llama_ggml_backend_devices, LlamaBackendDeviceType, LogOptions};
+use multimodal::ExtractedImage;
 use rmcp::model::{Role, Tool};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -60,10 +62,10 @@ pub struct InferenceRuntime {
 static RUNTIME: StdMutex<Weak<InferenceRuntime>> = StdMutex::new(Weak::new());
 
 impl InferenceRuntime {
-    pub fn get_or_init() -> Arc<Self> {
+    pub fn get_or_init() -> Result<Arc<Self>> {
         let mut guard = RUNTIME.lock().expect("runtime lock poisoned");
         if let Some(runtime) = guard.upgrade() {
-            return runtime;
+            return Ok(runtime);
         }
         // Safety invariant: the Weak::upgrade() check and LlamaBackend::init()
         // both execute inside this same mutex guard, so there is no window where
@@ -78,7 +80,10 @@ impl InferenceRuntime {
                      the mutex guard prevents concurrent re-init"
                 )
             }
-            Err(e) => panic!("Failed to init llama backend: {}", e),
+            Err(e) => {
+                tracing::error!(error = %e, "failed to initialize local inference runtime");
+                return Err(anyhow::anyhow!("Failed to init llama backend: {}", e));
+            }
         };
         llama_cpp_2::send_logs_to_tracing(LogOptions::default());
         let runtime = Arc::new(Self {
@@ -86,7 +91,7 @@ impl InferenceRuntime {
             backend,
         });
         *guard = Arc::downgrade(&runtime);
-        runtime
+        Ok(runtime)
     }
 
     pub fn backend(&self) -> &LlamaBackend {
@@ -114,14 +119,15 @@ const DEFAULT_MODEL: &str = "bartowski/Llama-3.2-1B-Instruct-GGUF:Q4_K_M";
 
 pub const LOCAL_LLM_MODEL_CONFIG_KEY: &str = "LOCAL_LLM_MODEL";
 
-/// Resolve model path, context limit, and settings for a model ID from the registry.
-pub fn resolve_model_path(
-    model_id: &str,
-) -> Option<(
-    PathBuf,
-    usize,
-    crate::providers::local_inference::local_model_registry::ModelSettings,
-)> {
+pub struct ResolvedModelPaths {
+    pub model_path: PathBuf,
+    pub context_limit: usize,
+    pub settings: crate::providers::local_inference::local_model_registry::ModelSettings,
+    pub mmproj_path: Option<PathBuf>,
+}
+
+/// Resolve model path, context limit, settings, and mmproj path for a model ID from the registry.
+pub fn resolve_model_path(model_id: &str) -> Option<ResolvedModelPaths> {
     use crate::providers::local_inference::local_model_registry::{
         default_settings_for_model, get_registry,
     };
@@ -135,7 +141,15 @@ pub fn resolve_model_path(
             // recognized (or with a different quantization) still get the right behavior.
             let defaults = default_settings_for_model(model_id);
             settings.native_tool_calling = defaults.native_tool_calling;
-            return Some((entry.local_path.clone(), ctx, settings));
+            settings.vision_capable = defaults.vision_capable;
+            settings.mmproj_size_bytes = entry.mmproj_size_bytes;
+            let mmproj_path = entry.mmproj_path.as_ref().filter(|p| p.exists()).cloned();
+            return Some(ResolvedModelPaths {
+                model_path: entry.local_path.clone(),
+                context_limit: ctx,
+                settings,
+                mmproj_path,
+            });
         }
     }
 
@@ -208,7 +222,31 @@ fn build_openai_messages_json(system: &str, messages: &[Message]) -> String {
 
     let mut arr: Vec<Value> = vec![json!({"role": "system", "content": system})];
     arr.extend(format_messages(messages, &ImageFormat::OpenAi));
+    strip_image_parts_from_messages(&mut arr);
     serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Remove `image_url` content parts from OpenAI-format messages JSON, replacing
+/// each with a text note. This prevents an FFI crash in llama.cpp which does not
+/// accept `image_url` content-part types.
+fn strip_image_parts_from_messages(messages: &mut [Value]) {
+    let mut stripped = false;
+    for msg in messages.iter_mut() {
+        if let Some(content) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+            for part in content.iter_mut() {
+                if part.get("type").and_then(|t| t.as_str()) == Some("image_url") {
+                    *part = json!({
+                        "type": "text",
+                        "text": "[Image attached — image input is not supported with the currently selected model]"
+                    });
+                    stripped = true;
+                }
+            }
+        }
+    }
+    if stripped {
+        tracing::warn!("Stripped image content parts from messages — vision encoder not available for this model");
+    }
 }
 
 /// Convert a message into plain text for the emulator path's chat history.
@@ -269,6 +307,12 @@ fn extract_text_content(msg: &Message) -> String {
                     parts.push(format!("Command error: {}", e));
                 }
             },
+            MessageContent::Image(_) => {
+                parts.push(
+                    "[Image attached — image input is not supported with the currently selected model]"
+                        .to_string(),
+                );
+            }
             _ => {}
         }
     }
@@ -316,7 +360,7 @@ pub struct LocalInferenceProvider {
 
 impl LocalInferenceProvider {
     pub async fn from_env(model: ModelConfig, _extensions: Vec<ExtensionConfig>) -> Result<Self> {
-        let runtime = InferenceRuntime::get_or_init();
+        let runtime = InferenceRuntime::get_or_init()?;
         let model_slot = runtime.get_or_create_model_slot(&model.model_name);
         Ok(Self {
             runtime,
@@ -331,8 +375,9 @@ impl LocalInferenceProvider {
         model_id: &str,
         settings: &crate::providers::local_inference::local_model_registry::ModelSettings,
     ) -> Result<LoadedModel, ProviderError> {
-        let (model_path, _context_limit, _) = resolve_model_path(model_id)
+        let resolved = resolve_model_path(model_id)
             .ok_or_else(|| ProviderError::ExecutionError(format!("Unknown model: {}", model_id)))?;
+        let model_path = resolved.model_path;
 
         if !model_path.exists() {
             return Err(ProviderError::ExecutionError(format!(
@@ -368,9 +413,49 @@ impl LocalInferenceProvider {
             }
         };
 
+        let mtmd_ctx = Self::init_mtmd_context(&model, &resolved.mmproj_path, settings);
+
         tracing::info!(model_id = model_id, "Model loaded successfully");
 
-        Ok(LoadedModel { model, template })
+        Ok(LoadedModel {
+            model,
+            template,
+            mtmd_ctx,
+        })
+    }
+
+    fn init_mtmd_context(
+        model: &LlamaModel,
+        mmproj_path: &Option<PathBuf>,
+        settings: &crate::providers::local_inference::local_model_registry::ModelSettings,
+    ) -> Option<llama_cpp_2::mtmd::MtmdContext> {
+        use llama_cpp_2::mtmd::{MtmdContext, MtmdContextParams};
+
+        let mmproj_path = mmproj_path.as_ref().filter(|p| p.exists())?;
+
+        let params = MtmdContextParams {
+            use_gpu: true,
+            n_threads: settings
+                .n_threads
+                .unwrap_or_else(|| MtmdContextParams::default().n_threads),
+            ..MtmdContextParams::default()
+        };
+
+        match MtmdContext::init_from_file(mmproj_path.to_str().unwrap_or_default(), model, &params)
+        {
+            Ok(ctx) => {
+                tracing::info!(
+                    vision = ctx.support_vision(),
+                    audio = ctx.support_audio(),
+                    "Multimodal context initialized"
+                );
+                Some(ctx)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to init multimodal context");
+                None
+            }
+        }
     }
 }
 
@@ -453,13 +538,11 @@ impl Provider for LocalInferenceProvider {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
-        let (_model_path, model_context_limit, model_settings) =
-            resolve_model_path(&model_config.model_name).ok_or_else(|| {
-                ProviderError::ExecutionError(format!(
-                    "Model not found: {}",
-                    model_config.model_name
-                ))
-            })?;
+        let resolved = resolve_model_path(&model_config.model_name).ok_or_else(|| {
+            ProviderError::ExecutionError(format!("Model not found: {}", model_config.model_name))
+        })?;
+        let model_context_limit = resolved.context_limit;
+        let model_settings = resolved.settings;
 
         // Ensure model is loaded — unload any other models first to free memory.
         {
@@ -503,6 +586,18 @@ impl Provider for LocalInferenceProvider {
             system.to_string()
         };
 
+        // Extract images for vision-capable models, replacing them with markers.
+        // For non-vision models, leave messages unchanged (existing strip logic handles them).
+        let has_vision = resolved.mmproj_path.is_some();
+        let marker = llama_cpp_2::mtmd::mtmd_default_marker();
+        let (images, vision_messages): (Vec<ExtractedImage>, Option<Vec<Message>>) = if has_vision {
+            let (imgs, msgs) = multimodal::extract_images_from_messages(messages, marker);
+            (imgs, Some(msgs))
+        } else {
+            (Vec::new(), None)
+        };
+        let effective_messages: &[Message] = vision_messages.as_deref().unwrap_or(messages);
+
         // Build chat messages for the template
         let mut chat_messages =
             vec![
@@ -529,7 +624,7 @@ impl Provider for LocalInferenceProvider {
             })?];
         }
 
-        for msg in messages {
+        for msg in effective_messages {
             let role = match msg.role {
                 Role::User => "user",
                 Role::Assistant => "assistant",
@@ -553,7 +648,10 @@ impl Provider for LocalInferenceProvider {
         };
 
         let oai_messages_json = if model_settings.use_jinja || native_tool_calling {
-            Some(build_openai_messages_json(&system_prompt, messages))
+            Some(build_openai_messages_json(
+                &system_prompt,
+                effective_messages,
+            ))
         } else {
             None
         };
@@ -563,6 +661,7 @@ impl Provider for LocalInferenceProvider {
         let model_name = model_config.model_name.clone();
         let context_limit = model_context_limit;
         let settings = model_settings;
+        let mmproj_path = resolved.mmproj_path.clone();
 
         let log_payload = serde_json::json!({
             "system": &system_prompt,
@@ -604,8 +703,8 @@ impl Provider for LocalInferenceProvider {
                 }};
             }
 
-            let model_guard = model_arc.blocking_lock();
-            let loaded = match model_guard.as_ref() {
+            let mut model_guard = model_arc.blocking_lock();
+            let loaded = match model_guard.as_mut() {
                 Some(l) => l,
                 None => {
                     send_err!(ProviderError::ExecutionError(
@@ -613,6 +712,16 @@ impl Provider for LocalInferenceProvider {
                     ));
                 }
             };
+
+            // Lazily initialize the multimodal context if the vision encoder
+            // was downloaded after the model was loaded.
+            if !images.is_empty() && loaded.mtmd_ctx.is_none() {
+                loaded.mtmd_ctx = LocalInferenceProvider::init_mtmd_context(
+                    &loaded.model,
+                    &mmproj_path,
+                    &settings,
+                );
+            }
 
             let message_id = Uuid::new_v4().to_string();
 
@@ -626,6 +735,7 @@ impl Provider for LocalInferenceProvider {
                 message_id: &message_id,
                 tx: &tx,
                 log: &mut log,
+                images: &images,
             };
 
             let result = if use_emulator {

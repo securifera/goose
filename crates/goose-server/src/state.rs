@@ -5,7 +5,7 @@ use goose::scheduler_trait::SchedulerTrait;
 use goose::session::SessionManager;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -29,9 +29,10 @@ pub struct AppState {
     pub gateway_manager: Arc<GatewayManager>,
     pub extension_loading_tasks: ExtensionLoadingTasks,
     #[cfg(feature = "local-inference")]
-    pub inference_runtime: Arc<InferenceRuntime>,
+    inference_runtime: Arc<OnceLock<Arc<InferenceRuntime>>>,
     pub settings: Arc<Settings>,
     session_buses: Arc<Mutex<HashMap<String, Arc<SessionEventBus>>>>,
+
 }
 
 impl AppState {
@@ -50,10 +51,30 @@ impl AppState {
             gateway_manager,
             extension_loading_tasks: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "local-inference")]
-            inference_runtime: InferenceRuntime::get_or_init(),
+            inference_runtime: Arc::new(OnceLock::new()),
             settings: Arc::new(settings),
             session_buses: Arc::new(Mutex::new(HashMap::new())),
         }))
+    }
+
+    #[cfg(feature = "local-inference")]
+    pub fn get_inference_runtime(&self) -> anyhow::Result<Arc<InferenceRuntime>> {
+        if let Some(runtime) = self.inference_runtime.get() {
+            return Ok(runtime.clone());
+        }
+
+        let runtime = InferenceRuntime::get_or_init()?;
+
+        // Another thread may win the race to cache the runtime in AppState.
+        // In that case, return the already-initialized cached runtime.
+        match self.inference_runtime.set(runtime.clone()) {
+            Ok(()) => Ok(runtime),
+            Err(_) => Ok(self
+                .inference_runtime
+                .get()
+                .expect("inference runtime initialized by another thread")
+                .clone()),
+        }
     }
 
     pub async fn set_extension_loading_task(

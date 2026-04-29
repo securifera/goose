@@ -21,6 +21,7 @@ import { toastError } from '../toasts';
 import MentionPopover, { DisplayItemWithMatch } from './MentionPopover';
 import { COST_TRACKING_ENABLED } from '../updates';
 import { CostTracker } from './bottom_menu/CostTracker';
+import { ContextWindowIndicator } from './bottom_menu/ContextWindowIndicator';
 import { DroppedFile, useFileDrop } from '../hooks/useFileDrop';
 import { Recipe } from '../recipe';
 import { MessageQueue, QueuedMessage } from './MessageQueue';
@@ -57,6 +58,14 @@ const MAX_IMAGES_PER_MESSAGE = 10;
 const TOKEN_LIMIT_DEFAULT = 128000; // fallback for custom models that the backend doesn't know about
 const TOOLS_MAX_SUGGESTED = 60; // max number of tools before we show a warning
 
+const getContextAlertType = (totalTokens: number, tokenLimit: number): AlertType => {
+  const percentage = tokenLimit ? (totalTokens / tokenLimit) * 100 : 0;
+
+  if (percentage > 90) return AlertType.Error;
+  if (percentage > 75) return AlertType.Warning;
+  return AlertType.Info;
+};
+
 // Manual compact trigger message - must match backend constant
 const MANUAL_COMPACT_TRIGGER = '/compact';
 
@@ -83,7 +92,8 @@ const i18n = defineMessages({
   },
   tooManyTools: {
     id: 'chatInput.tooManyTools',
-    defaultMessage: 'Too many tools can degrade performance.\nTool count: {toolCount} (recommend: {recommended})',
+    defaultMessage:
+      'Too many tools can degrade performance.\nTool count: {toolCount} (recommend: {recommended})',
   },
   viewExtensions: {
     id: 'chatInput.viewExtensions',
@@ -543,7 +553,7 @@ export default function ChatInput({
     // Show alert when either there is registered token usage, or we know the limit
     if ((totalTokens && totalTokens > 0) || (isTokenLimitLoaded && tokenLimit)) {
       addAlert({
-        type: AlertType.Info,
+        type: getContextAlertType(totalTokens || 0, tokenLimit),
         message: intl.formatMessage(i18n.contextWindow),
         progress: {
           current: totalTokens || 0,
@@ -563,7 +573,10 @@ export default function ChatInput({
     if (toolCount !== null && toolCount > TOOLS_MAX_SUGGESTED) {
       addAlert({
         type: AlertType.Warning,
-        message: intl.formatMessage(i18n.tooManyTools, { toolCount, recommended: TOOLS_MAX_SUGGESTED }),
+        message: intl.formatMessage(i18n.tooManyTools, {
+          toolCount,
+          recommended: TOOLS_MAX_SUGGESTED,
+        }),
         action: {
           text: intl.formatMessage(i18n.viewExtensions),
           onClick: () => setView('extensions'),
@@ -1558,7 +1571,9 @@ export default function ChatInput({
                     <p className="text-sm text-text-primary truncate" title={file.name}>
                       {file.name}
                     </p>
-                    <p className="text-xs text-text-secondary">{file.type || intl.formatMessage(i18n.unknownType)}</p>
+                    <p className="text-xs text-text-secondary">
+                      {file.type || intl.formatMessage(i18n.unknownType)}
+                    </p>
                   </div>
                 </div>
               )}
@@ -1628,13 +1643,17 @@ export default function ChatInput({
               </div>
             </>
           )}
+          <ContextWindowIndicator
+            totalTokens={totalTokens || 0}
+            tokenLimit={tokenLimit}
+            alerts={alerts}
+          />
           <Tooltip>
             <div>
               <ModelsBottomBar
                 sessionId={sessionId}
                 dropdownRef={dropdownRef}
                 setView={setView}
-                alerts={alerts}
                 sessionModel={effectiveModel}
                 sessionProvider={effectiveProvider}
                 onModelChanged={setModelOverride}
@@ -1670,7 +1689,9 @@ export default function ChatInput({
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>
-                    {recipe ? intl.formatMessage(i18n.viewEditRecipe) : intl.formatMessage(i18n.createRecipeFromSession)}
+                    {recipe
+                      ? intl.formatMessage(i18n.viewEditRecipe)
+                      : intl.formatMessage(i18n.createRecipeFromSession)}
                   </TooltipContent>
                 </Tooltip>
               </div>
