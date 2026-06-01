@@ -3,7 +3,7 @@ use config::{Config, Environment};
 use serde::Deserialize;
 use std::net::SocketAddr;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct Settings {
     #[serde(default = "default_host")]
     pub host: String,
