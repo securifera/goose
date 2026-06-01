@@ -720,10 +720,15 @@ async fn agent_add_extension(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AddExtensionRequest>,
 ) -> Result<StatusCode, ErrorResponse> {
-    let extension_name = request.config.name();
+    let config: ExtensionConfig =
+        serde_json::from_value(request.config).map_err(|e| ErrorResponse {
+            message: format!("Invalid extension config: {}", e),
+            status: StatusCode::BAD_REQUEST,
+        })?;
+    let extension_name = config.name();
 
     // Reject local-process extensions when mcp_only mode is active.
-    if state.settings.mcp_only && !crate::configuration::is_mcp_only_extension(&request.config) {
+    if state.settings.mcp_only && !crate::configuration::is_mcp_only_extension(&config) {
         return Err(ErrorResponse {
             message: format!(
                 "Extension '{}' is not an MCP network extension and the server is \
@@ -737,7 +742,7 @@ async fn agent_add_extension(
     let agent = state.get_agent(request.session_id.clone()).await?;
 
     agent
-        .add_extension(request.config, &request.session_id)
+        .add_extension(config, &request.session_id)
         .await
         .map_err(|e| {
             #[cfg(feature = "telemetry")]
