@@ -21,6 +21,8 @@ use goose::config::resolve_extensions_for_new_session;
 use goose::config::{Config, GooseMode};
 use goose::model::ModelConfig;
 use goose::providers::create;
+use goose::custom_requests::AddExtensionRequest;
+use goose::custom_requests::RemoveExtensionRequest;
 use goose::recipe::Recipe;
 use goose::recipe_deeplink;
 use goose::session::session_manager::SessionType;
