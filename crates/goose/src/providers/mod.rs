@@ -19,6 +19,8 @@ pub mod codex_acp;
 pub mod copilot_acp;
 pub mod cursor_agent;
 pub mod databricks;
+pub mod databricks_auth;
+pub mod databricks_v2;
 pub mod embedding;
 pub mod errors;
 pub mod formats;
@@ -54,11 +56,13 @@ pub mod tetrate;
 pub mod toolshim;
 pub mod usage_estimator;
 pub mod utils;
-pub mod venice;
+
 pub mod xai;
+pub mod xai_oauth;
 
 pub use init::{
     cleanup_provider, create, create_with_default_model, create_with_named_model,
-    get_from_registry, inventory_identity, providers, refresh_custom_providers,
+    create_with_working_dir, get_from_registry, inventory_identity, providers,
+    refresh_custom_providers,
 };
 pub use retry::{retry_operation, RetryConfig};

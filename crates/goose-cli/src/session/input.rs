@@ -20,6 +20,7 @@ pub enum InputResult {
     ListPrompts(Option<String>),
     PromptCommand(PromptCommandOptions),
     GooseMode(String),
+    Model(Option<String>),
     Plan(PlanCommandOptions),
     EndPlan,
     Clear,
@@ -58,7 +59,7 @@ impl rustyline::ConditionalEventHandler for CtrlCHandler {
     fn handle(
         &self,
         _event: &rustyline::Event,
-        _n: usize,
+        _n: u16,
         _positive: bool,
         ctx: &rustyline::EventContext,
     ) -> Option<rustyline::Cmd> {
@@ -149,9 +150,7 @@ pub fn get_input(
         rustyline::EventHandler::Conditional(Box::new(CtrlCHandler::new(completion_cache))),
     );
 
-    let prompt = get_input_prompt_string();
-
-    let input = match editor.readline(&prompt) {
+    let input = match editor.readline("> ") {
         Ok(text) => text,
         Err(e) => match e {
             rustyline::error::ReadlineError::Interrupted => return Ok(InputResult::Exit),
@@ -198,6 +197,8 @@ fn handle_slash_command(input: &str) -> Option<InputResult> {
     const CMD_EXTENSION: &str = "/extension ";
     const CMD_BUILTIN: &str = "/builtin ";
     const CMD_MODE: &str = "/mode ";
+    const CMD_MODEL: &str = "/model";
+    const CMD_MODEL_WITH_SPACE: &str = "/model ";
     const CMD_PLAN: &str = "/plan";
     const CMD_ENDPLAN: &str = "/endplan";
     const CMD_CLEAR: &str = "/clear";
@@ -263,6 +264,19 @@ fn handle_slash_command(input: &str) -> Option<InputResult> {
         s if s.starts_with(CMD_MODE) => Some(InputResult::GooseMode(
             s.get(CMD_MODE.len()..).unwrap_or("").to_string(),
         )),
+        s if s == CMD_MODEL => Some(InputResult::Model(None)),
+        s if s.starts_with(CMD_MODEL_WITH_SPACE) => {
+            let model = s
+                .get(CMD_MODEL_WITH_SPACE.len()..)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if model.is_empty() {
+                Some(InputResult::Model(None))
+            } else {
+                Some(InputResult::Model(Some(model)))
+            }
+        }
         s if s.starts_with(CMD_PLAN) => {
             parse_plan_command(s.get(CMD_PLAN.len()..).unwrap_or("").trim().to_string())
         }
@@ -387,24 +401,6 @@ fn parse_plan_command(input: String) -> Option<InputResult> {
     Some(InputResult::Plan(options))
 }
 
-fn get_input_prompt_string() -> String {
-    if is_vte_with_broken_emoji_width() {
-        return "> ".to_string();
-    }
-    "🪿 ".to_string()
-}
-
-/// VTE < 0.70 renders 🪿 as 1 cell while unicode-width counts 2, causing cursor offset.
-fn is_vte_with_broken_emoji_width() -> bool {
-    let Ok(vte_version) = std::env::var("VTE_VERSION") else {
-        return false;
-    };
-    let Ok(version) = vte_version.parse::<u32>() else {
-        return true;
-    };
-    version < 7000
-}
-
 fn print_help() {
     let newline_key = get_newline_key().to_ascii_uppercase();
     let modes = GooseMode::VARIANTS.join(", ");
@@ -419,6 +415,7 @@ fn print_help() {
 /prompts [--extension <name>] - List all available prompts, optionally filtered by extension
 /prompt <n> [--info] [key=value...] - Get prompt info or execute a prompt
 /mode <name> - Set the goose mode to use ({modes})
+/model [name] - Show the current model, or switch models for this session while keeping the same provider
 /plan <message_text> -  Enters 'plan' mode with optional message. Create a plan based on the current messages and asks user if they want to act on it.
                         If user acts on the plan, goose mode is set to 'auto' and returns to 'normal' goose mode.
                         To warm up goose before using '/plan', we recommend setting '/mode approve' & putting appropriate context into goose.
@@ -516,6 +513,21 @@ mod tests {
             assert_eq!(names, "dev,git");
         } else {
             panic!("Expected AddBuiltin");
+        }
+
+        // Test model command
+        assert!(matches!(
+            handle_slash_command("/model"),
+            Some(InputResult::Model(None))
+        ));
+        assert!(matches!(
+            handle_slash_command("/model   "),
+            Some(InputResult::Model(None))
+        ));
+        if let Some(InputResult::Model(Some(model))) = handle_slash_command("/model gpt-4.1") {
+            assert_eq!(model, "gpt-4.1");
+        } else {
+            panic!("Expected Model");
         }
 
         // Test unknown commands

@@ -1,8 +1,10 @@
 use super::base::{ConfigKey, ModelInfo, ProviderType};
 use super::canonical::{map_provider_name, map_to_canonical_model, CanonicalModelRegistry};
+use super::catalog::ProviderSetupCategory;
 use crate::config::declarative_providers::{DeclarativeProviderConfig, ProviderEngine};
 use crate::config::Config;
 use crate::session::session_manager::SessionStorage;
+use crate::utils::bytes_to_hex;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,7 @@ pub struct ProviderInventoryEntry {
     pub default_model: String,
     pub configured: bool,
     pub provider_type: ProviderType,
+    pub category: ProviderSetupCategory,
     pub config_keys: Vec<ConfigKey>,
     pub setup_steps: Vec<String>,
     pub supports_refresh: bool,
@@ -124,7 +127,7 @@ impl InventoryIdentityInput {
         Ok(InventoryIdentity {
             provider_id,
             provider_family,
-            inventory_key: format!("{digest:x}"),
+            inventory_key: bytes_to_hex(digest),
         })
     }
 }
@@ -248,6 +251,7 @@ struct ProviderDescriptor {
     identity: InventoryIdentity,
     configured: bool,
     provider_type: ProviderType,
+    category: ProviderSetupCategory,
     config_keys: Vec<ConfigKey>,
     setup_steps: Vec<String>,
     supports_refresh: bool,
@@ -289,6 +293,7 @@ impl ProviderInventoryService {
             default_model: descriptor.default_model,
             configured: descriptor.configured,
             provider_type: descriptor.provider_type,
+            category: descriptor.category,
             config_keys: descriptor.config_keys,
             setup_steps: descriptor.setup_steps,
             supports_refresh: descriptor.supports_refresh,
@@ -582,6 +587,8 @@ impl ProviderInventoryService {
             identity,
             configured: entry.inventory_configured(),
             provider_type: entry.provider_type(),
+            category: crate::providers::catalog::get_provider_setup_category(&metadata.name)
+                .unwrap_or(ProviderSetupCategory::Model),
             config_keys: metadata.config_keys.clone(),
             setup_steps: metadata.setup_steps.clone(),
             supports_refresh: entry.supports_inventory_refresh(),
@@ -804,7 +811,7 @@ pub fn declarative_inventory_identity(
             .public_inputs
             .insert("headers".to_string(), serialize_string_map(headers)?);
     }
-    if config.requires_auth && !config.api_key_env.is_empty() {
+    if !config.api_key_env.is_empty() {
         if let Some(value) = config_secret_value(global, &config.api_key_env) {
             identity
                 .secret_inputs
@@ -875,10 +882,10 @@ fn enrich_model_ids_with_canonical(
         models.push(model);
     }
 
-    // For databricks, prefer goose- prefixed model_ids when there are duplicates.
+    // For Databricks providers, prefer goose- prefixed model_ids when there are duplicates.
     // Re-scan: if a later model_id with "goose-" prefix maps to the same display name,
     // swap it in.
-    if provider_family == "databricks" {
+    if matches!(provider_family, "databricks" | "databricks_v2") {
         let mut name_to_idx: HashMap<String, usize> = HashMap::new();
         for (idx, model) in models.iter().enumerate() {
             name_to_idx.insert(model.name.clone(), idx);
@@ -1170,6 +1177,26 @@ mod tests {
 
         assert_eq!(models.len(), 1);
         assert!(models[0].name.contains("Claude"));
+    }
+
+    #[test]
+    fn databricks_v2_inventory_prefers_goose_model_ids_for_duplicate_names() {
+        let models = enrich_model_ids_with_canonical(
+            "databricks_v2",
+            &[
+                "databricks-gpt-5-5".to_string(),
+                "goose-gpt-5-5".to_string(),
+            ],
+        );
+
+        assert!(
+            models.iter().any(|model| model.id == "goose-gpt-5-5"),
+            "expected goose-gpt-5-5 to win duplicate canonical-name tie, got {models:?}"
+        );
+        assert!(
+            !models.iter().any(|model| model.id == "databricks-gpt-5-5"),
+            "expected databricks-gpt-5-5 to be replaced by goose-gpt-5-5, got {models:?}"
+        );
     }
 
     #[test]

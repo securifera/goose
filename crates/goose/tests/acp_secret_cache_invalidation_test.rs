@@ -47,7 +47,7 @@ impl Provider for MockProvider {
 }
 
 fn mock_provider_factory() -> goose::acp::server::AcpProviderFactory {
-    Arc::new(|provider_name, model_config, _extensions| {
+    Arc::new(|provider_name, model_config, _extensions, _working_dir| {
         Box::pin(async move {
             Ok(Arc::new(MockProvider {
                 name: provider_name,
@@ -79,6 +79,7 @@ fn acp_secret_mutations_and_inventory_refresh_invalidate_global_secret_cache() {
         ("GOOSE_PATH_ROOT", Some(root_path.as_str())),
         ("GOOSE_DISABLE_KEYRING", Some("1")),
         ("ANTHROPIC_API_KEY", None),
+        ("GROQ_API_KEY", None),
         ("OPENAI_API_KEY", None),
         ("XAI_API_KEY", None),
         ("XAI_HOST", None),
@@ -87,12 +88,12 @@ fn acp_secret_mutations_and_inventory_refresh_invalidate_global_secret_cache() {
     let config_dir = Paths::config_dir();
     let data_dir = Paths::data_dir();
     write_config(&config_dir);
-    write_secrets(&config_dir, "OPENAI_API_KEY: stale-key\n");
+    write_secrets(&config_dir, "GROQ_API_KEY: stale-key\n");
 
     run_test(async move {
         assert_eq!(
             Config::global()
-                .get_secret::<String>("OPENAI_API_KEY")
+                .get_secret::<String>("GROQ_API_KEY")
                 .unwrap(),
             "stale-key"
         );
@@ -109,48 +110,48 @@ fn acp_secret_mutations_and_inventory_refresh_invalidate_global_secret_cache() {
         };
         let conn = AcpServerConnection::new(config, openai).await;
 
-        write_secrets(&config_dir, "OPENAI_API_KEY: fresh-key\n");
+        write_secrets(&config_dir, "GROQ_API_KEY: fresh-key\n");
         send_custom(
             conn.cx(),
-            "_goose/secret/upsert",
+            "_goose/unstable/dictation/secret/save",
             serde_json::json!({
-                "key": "OPENAI_API_KEY",
+                "provider": "groq",
                 "value": "fresh-key",
             }),
         )
         .await
-        .expect("secret upsert should succeed");
+        .expect("dictation secret save should succeed");
 
         assert_eq!(
             Config::global()
-                .get_secret::<String>("OPENAI_API_KEY")
+                .get_secret::<String>("GROQ_API_KEY")
                 .unwrap(),
             "fresh-key",
-            "ACP secret upsert should invalidate the global secrets cache"
+            "ACP dictation secret save should invalidate the global secrets cache"
         );
 
         write_secrets(&config_dir, "{}\n");
         send_custom(
             conn.cx(),
-            "_goose/secret/remove",
+            "_goose/unstable/dictation/secret/delete",
             serde_json::json!({
-                "key": "OPENAI_API_KEY",
+                "provider": "groq",
             }),
         )
         .await
-        .expect("secret remove should succeed");
+        .expect("dictation secret delete should succeed");
 
         assert!(
             matches!(
-                Config::global().get_secret::<String>("OPENAI_API_KEY"),
+                Config::global().get_secret::<String>("GROQ_API_KEY"),
                 Err(ConfigError::NotFound(_))
             ),
-            "ACP secret remove should invalidate the global secrets cache"
+            "ACP dictation secret delete should invalidate the global secrets cache"
         );
 
         let save_provider_config = send_custom(
             conn.cx(),
-            "_goose/providers/config/save",
+            "_goose/unstable/providers/config/save",
             serde_json::json!({
                 "providerId": "xai",
                 "fields": [
@@ -198,7 +199,7 @@ fn acp_secret_mutations_and_inventory_refresh_invalidate_global_secret_cache() {
 
         let read_provider_config = send_custom(
             conn.cx(),
-            "_goose/providers/config/read",
+            "_goose/unstable/providers/config/read",
             serde_json::json!({
                 "providerId": "xai",
             }),
@@ -222,7 +223,7 @@ fn acp_secret_mutations_and_inventory_refresh_invalidate_global_secret_cache() {
 
         let delete_provider_config = send_custom(
             conn.cx(),
-            "_goose/providers/config/delete",
+            "_goose/unstable/providers/config/delete",
             serde_json::json!({
                 "providerId": "xai",
             }),
@@ -254,7 +255,7 @@ fn acp_secret_mutations_and_inventory_refresh_invalidate_global_secret_cache() {
 
         let refresh = send_custom(
             conn.cx(),
-            "_goose/providers/inventory/refresh",
+            "_goose/unstable/providers/inventory/refresh",
             serde_json::json!({
                 "providerIds": ["anthropic"],
             }),

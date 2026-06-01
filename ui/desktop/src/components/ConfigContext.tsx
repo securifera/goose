@@ -1,22 +1,16 @@
 import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
+import { readAllConfig, readConfig, removeConfig, upsertConfig, providers } from '../api';
 import {
-  readAllConfig,
-  readConfig,
-  removeConfig,
-  upsertConfig,
-  getExtensions as apiGetExtensions,
-  addExtension as apiAddExtension,
-  removeExtension as apiRemoveExtension,
-  providers,
-} from '../api';
+  getConfiguredExtensions,
+  addConfiguredExtension,
+  removeConfiguredExtension,
+} from '../acp/extensions';
 import { pruneDeprecatedBundledExtensions, syncBundledExtensions } from './settings/extensions';
 import type {
   ConfigResponse,
   UpsertConfigQuery,
   ConfigKeyQuery,
-  ExtensionResponse,
   ProviderDetails,
-  ExtensionQuery,
   ExtensionConfig,
 } from '../api';
 
@@ -46,14 +40,6 @@ interface ConfigContextType {
 
 interface ConfigProviderProps {
   children: React.ReactNode;
-}
-
-export class MalformedConfigError extends Error {
-  constructor() {
-    super('Check contents of ~/.config/goose/config.yaml');
-    this.name = 'MalformedConfigError';
-    Object.setPrototypeOf(this, MalformedConfigError.prototype);
-  }
 }
 
 const ConfigContext = createContext<ConfigContextType | undefined>(undefined);
@@ -114,29 +100,15 @@ export const ConfigProvider: React.FC<ConfigProviderProps> = ({ children }) => {
   );
 
   const refreshExtensions = useCallback(async () => {
-    const result = await apiGetExtensions();
-
-    if (result.response.status === 422) {
-      throw new MalformedConfigError();
-    }
-
-    if (result.error && !result.data) {
-      console.error(result.error);
-      return extensionsList;
-    }
-
-    const extensionResponse: ExtensionResponse = result.data!;
-    setExtensionsList(extensionResponse.extensions);
-    setExtensionWarnings(extensionResponse.warnings || []);
-    return extensionResponse.extensions;
-  }, [extensionsList]);
+    const { extensions, warnings } = await getConfiguredExtensions();
+    setExtensionsList(extensions);
+    setExtensionWarnings(warnings || []);
+    return extensions;
+  }, []);
 
   const addExtension = useCallback(
     async (name: string, config: ExtensionConfig, enabled: boolean) => {
-      const query: ExtensionQuery = { name, config, enabled };
-      await apiAddExtension({
-        body: query,
-      });
+      await addConfiguredExtension(name, config, enabled);
       await reloadConfig();
       // Refresh extensions list after successful addition
       await refreshExtensions();
@@ -146,7 +118,7 @@ export const ConfigProvider: React.FC<ConfigProviderProps> = ({ children }) => {
 
   const removeExtension = useCallback(
     async (name: string) => {
-      await apiRemoveExtension({ path: { name: name } });
+      await removeConfiguredExtension(name);
       await reloadConfig();
       // Refresh extensions list after successful removal
       await refreshExtensions();
@@ -212,8 +184,8 @@ export const ConfigProvider: React.FC<ConfigProviderProps> = ({ children }) => {
 
       // Load extensions
       try {
-        const extensionsResponse = await apiGetExtensions();
-        let extensions = extensionsResponse.data?.extensions || [];
+        const extensionsResponse = await getConfiguredExtensions();
+        let extensions = extensionsResponse.extensions;
 
         // Always sync bundled extensions from bundled-extensions.json
         // This ensures:
@@ -226,20 +198,19 @@ export const ConfigProvider: React.FC<ConfigProviderProps> = ({ children }) => {
           config: ExtensionConfig,
           enabled: boolean
         ) => {
-          const query: ExtensionQuery = { name, config, enabled };
-          await apiAddExtension({ body: query });
+          await addConfiguredExtension(name, config, enabled);
         };
         const removeExtensionForSync = async (name: string) => {
-          await apiRemoveExtension({ path: { name } });
+          await removeConfiguredExtension(name);
         };
         extensions = await pruneDeprecatedBundledExtensions(extensions, removeExtensionForSync);
         await syncBundledExtensions(extensions, addExtensionForSync);
         // Reload extensions after sync
-        const refreshedResponse = await apiGetExtensions();
-        extensions = refreshedResponse.data?.extensions || [];
+        const refreshedResponse = await getConfiguredExtensions();
+        extensions = refreshedResponse.extensions;
 
         setExtensionsList(extensions);
-        setExtensionWarnings(extensionsResponse.data?.warnings || []);
+        setExtensionWarnings(extensionsResponse.warnings || []);
       } catch (error) {
         console.error('Failed to load extensions:', error);
       }

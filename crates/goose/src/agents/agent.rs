@@ -22,20 +22,20 @@ use crate::agents::extension_manager::{
     get_parameter_names, ExtensionManager, ExtensionManagerCapabilities,
 };
 use crate::agents::final_output_tool::{FINAL_OUTPUT_CONTINUATION_MESSAGE, FINAL_OUTPUT_TOOL_NAME};
-use crate::agents::platform_extensions::summon::discover_filesystem_sources;
 use crate::agents::platform_extensions::MANAGE_EXTENSIONS_TOOL_NAME_COMPLETE;
 use crate::agents::platform_tools::PLATFORM_MANAGE_SCHEDULE_TOOL_NAME;
 use crate::agents::prompt_manager::PromptManager;
 use crate::agents::retry::{RetryManager, RetryResult};
 use crate::agents::types::{FrontendTool, SessionConfig, SharedProvider, ToolResultReceiver};
+use crate::config::extensions::name_to_key;
 use crate::config::permission::PermissionManager;
 use crate::config::{get_enabled_extensions, Config, GooseMode};
 use crate::context_mgmt::{
     check_if_compaction_needed, compact_messages, DEFAULT_COMPACTION_THRESHOLD,
 };
 use crate::conversation::message::{
-    ActionRequiredData, Message, MessageContent, ProviderMetadata, SystemNotificationType,
-    ToolRequest,
+    ActionRequiredData, InferenceMetadata, Message, MessageContent, ProviderMetadata,
+    SystemNotificationType, ToolRequest,
 };
 use crate::conversation::{debug_conversation_fix, fix_conversation, Conversation};
 use crate::mcp_utils::ToolResult;
@@ -50,7 +50,7 @@ use crate::security::adversary_inspector::AdversaryInspector;
 use crate::security::egress_inspector::EgressInspector;
 use crate::security::security_inspector::SecurityInspector;
 use crate::session::extension_data::{EnabledExtensionsState, ExtensionState};
-use crate::session::{Session, SessionManager};
+use crate::session::{Session, SessionManager, SessionNameUpdate};
 use crate::tool_inspection::ToolInspectionManager;
 use crate::tool_monitor::RepetitionInspector;
 use crate::utils::is_token_cancelled;
@@ -65,7 +65,68 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 const DEFAULT_MAX_TURNS: u32 = 1000;
+const DEFAULT_STOP_HOOK_BLOCK_CAP: u32 = 8;
 const COMPACTION_THINKING_TEXT: &str = "goose is compacting the conversation...";
+const DEFAULT_FRONTEND_INSTRUCTIONS: &str = "The following tools are provided directly by the frontend and will be executed by the frontend when called.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolCategory {
+    Shell,
+    Read,
+    Write,
+    Other,
+}
+
+fn categorize_tool(tool_name: &str) -> ToolCategory {
+    let local = tool_name.rsplit("__").next().unwrap_or(tool_name);
+    match local {
+        "shell" | "bash" | "exec" | "run" => ToolCategory::Shell,
+        "read" | "view" | "cat" | "read_file" => ToolCategory::Read,
+        "write" | "edit" | "patch" | "write_file" | "edit_file" => ToolCategory::Write,
+        _ => ToolCategory::Other,
+    }
+}
+
+fn extract_string_arg(input: &Value, keys: &[&str]) -> Option<String> {
+    let obj = input.as_object()?;
+    for k in keys {
+        if let Some(s) = obj.get(*k).and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn stop_hook_denial_context_message(plugin: &str, reason: &str) -> Message {
+    let nudge = format!(
+        "Stop hook `{plugin}` blocked ending this turn:
+
+{reason}
+
+Address this policy hook denial before trying to stop again."
+    );
+    Message::user()
+        .with_text(nudge)
+        .with_visibility(false, true)
+}
+
+fn stop_hook_denial_notification(plugin: &str) -> Message {
+    Message::assistant().with_system_notification(
+        SystemNotificationType::InlineMessage,
+        format!("Stop hook `{plugin}` blocked ending this turn."),
+    )
+}
+
+fn stop_hook_block_cap_warning(plugin: &str, cap: u32) -> Message {
+    Message::assistant().with_system_notification(
+        SystemNotificationType::InlineMessage,
+        format!(
+            "Stop hook `{plugin}` blocked the turn from ending more than {cap} consecutive times — overriding and ending turn to avoid an infinite loop. Set GOOSE_STOP_HOOK_BLOCK_CAP to raise this limit."
+        ),
+    )
+}
 
 /// Context needed for the reply function
 pub struct ReplyContext {
@@ -116,6 +177,8 @@ pub struct AgentConfig {
     pub disable_session_naming: bool,
     pub goose_platform: GoosePlatform,
     pub mcp_host_info: Option<GooseMcpHostInfo>,
+    pub session_name_update_tx: Option<mpsc::UnboundedSender<SessionNameUpdate>>,
+    pub use_login_shell_path: Option<bool>,
 }
 
 impl AgentConfig {
@@ -135,11 +198,26 @@ impl AgentConfig {
             disable_session_naming,
             goose_platform,
             mcp_host_info: None,
+            session_name_update_tx: None,
+            use_login_shell_path: None,
         }
     }
 
     pub fn with_mcp_host_info(mut self, mcp_host_info: Option<GooseMcpHostInfo>) -> Self {
         self.mcp_host_info = mcp_host_info;
+        self
+    }
+
+    pub fn with_session_name_update_tx(
+        mut self,
+        tx: Option<mpsc::UnboundedSender<SessionNameUpdate>>,
+    ) -> Self {
+        self.session_name_update_tx = tx;
+        self
+    }
+
+    pub fn with_use_login_shell_path(mut self, use_login_shell_path: bool) -> Self {
+        self.use_login_shell_path = Some(use_login_shell_path);
         self
     }
 }
@@ -152,6 +230,7 @@ pub struct Agent {
 
     pub extension_manager: Arc<ExtensionManager>,
     pub(super) final_output_tool: Arc<Mutex<Option<FinalOutputTool>>>,
+    pub(super) frontend_extensions: Mutex<HashMap<String, ExtensionConfig>>,
     pub(super) frontend_tools: Mutex<HashMap<String, FrontendTool>>,
     pub(super) frontend_instructions: Mutex<Option<String>>,
     pub(super) prompt_manager: Mutex<PromptManager>,
@@ -161,7 +240,12 @@ pub struct Agent {
 
     pub(super) retry_manager: RetryManager,
     pub(super) tool_inspection_manager: ToolInspectionManager,
+    pub(super) hook_manager: crate::hooks::HookManager,
+    #[cfg(test)]
+    stop_hook_block_cap_override: Option<u32>,
     container: Mutex<Option<Container>>,
+    goal: Mutex<Option<String>>,
+    grind: Mutex<Option<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -250,6 +334,9 @@ impl Agent {
             .unwrap_or_else(|| goose_platform.to_string());
         let session_manager = Arc::clone(&config.session_manager);
         let permission_manager = Arc::clone(&config.permission_manager);
+        let use_login_shell_path = config
+            .use_login_shell_path
+            .unwrap_or(matches!(goose_platform, GoosePlatform::GooseDesktop));
         Self {
             provider: provider.clone(),
             config,
@@ -259,8 +346,10 @@ impl Agent {
                 session_manager,
                 client_name,
                 capabilities,
+                use_login_shell_path,
             )),
             final_output_tool: Arc::new(Mutex::new(None)),
+            frontend_extensions: Mutex::new(HashMap::new()),
             frontend_tools: Mutex::new(HashMap::new()),
             frontend_instructions: Mutex::new(None),
             prompt_manager: Mutex::new(PromptManager::new()),
@@ -272,7 +361,172 @@ impl Agent {
                 permission_manager,
                 provider.clone(),
             ),
+            hook_manager: crate::hooks::HookManager::load(std::env::current_dir().ok().as_deref()),
+            #[cfg(test)]
+            stop_hook_block_cap_override: None,
             container: Mutex::new(None),
+            goal: Mutex::new(None),
+            grind: Mutex::new(None),
+        }
+    }
+
+    /// Emit a lifecycle hook event with no extra context. Useful for events
+    /// that have no matcher (e.g. `SessionStart`, `SessionEnd`).
+    #[cfg(test)]
+    pub(crate) fn set_hook_manager_for_test(&mut self, hook_manager: crate::hooks::HookManager) {
+        self.hook_manager = hook_manager;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_stop_hook_block_cap_for_test(&mut self, cap: u32) {
+        self.stop_hook_block_cap_override = Some(cap);
+    }
+
+    fn stop_hook_block_cap(&self) -> u32 {
+        #[cfg(test)]
+        if let Some(cap) = self.stop_hook_block_cap_override {
+            return cap;
+        }
+
+        Config::global()
+            .get_param::<u32>("GOOSE_STOP_HOOK_BLOCK_CAP")
+            .unwrap_or(DEFAULT_STOP_HOOK_BLOCK_CAP)
+    }
+
+    pub async fn emit_hook(&self, event: crate::hooks::HookEvent, session_id: &str) {
+        if !self.hook_manager.has_hooks(event) {
+            return;
+        }
+        self.hook_manager
+            .emit(event, crate::hooks::HookContext::new(event, session_id))
+            .await;
+    }
+
+    async fn emit_pre_tool_extended_hooks(
+        &self,
+        tool_name: &str,
+        tool_input: Option<&Value>,
+        session: &Session,
+    ) {
+        let working_dir = session.working_dir.to_string_lossy().to_string();
+        match categorize_tool(tool_name) {
+            ToolCategory::Shell => {
+                if let Some(cmd) = tool_input.and_then(|v| extract_string_arg(v, &["command"])) {
+                    self.emit_with_matcher(
+                        crate::hooks::HookEvent::BeforeShellExecution,
+                        &session.id,
+                        &cmd,
+                        tool_name,
+                        tool_input.cloned(),
+                        &working_dir,
+                    )
+                    .await;
+                }
+            }
+            ToolCategory::Read => {
+                if let Some(path) =
+                    tool_input.and_then(|v| extract_string_arg(v, &["path", "file", "file_path"]))
+                {
+                    self.emit_with_matcher(
+                        crate::hooks::HookEvent::BeforeReadFile,
+                        &session.id,
+                        &path,
+                        tool_name,
+                        tool_input.cloned(),
+                        &working_dir,
+                    )
+                    .await;
+                }
+            }
+            ToolCategory::Write | ToolCategory::Other => {}
+        }
+    }
+
+    async fn emit_with_matcher(
+        &self,
+        event: crate::hooks::HookEvent,
+        session_id: &str,
+        matcher_context: &str,
+        tool_name: &str,
+        tool_input: Option<Value>,
+        working_dir: &str,
+    ) {
+        if !self.hook_manager.has_hooks(event) {
+            return;
+        }
+        let mut ctx = crate::hooks::HookContext::new(event, session_id)
+            .with_tool(tool_name.to_string(), tool_input)
+            .with_working_dir(working_dir.to_string());
+        ctx.matcher_context = Some(matcher_context.to_string());
+        self.hook_manager.emit(event, ctx).await;
+    }
+
+    fn with_post_tool_hook(
+        &self,
+        result: ToolCallResult,
+        tool_call: &CallToolRequestParams,
+        session: &Session,
+    ) -> ToolCallResult {
+        let hook_manager = self.hook_manager.clone();
+        let session_id = session.id.clone();
+        let working_dir = session.working_dir.to_string_lossy().to_string();
+        let tool_name = tool_call.name.to_string();
+        let tool_input = tool_call
+            .arguments
+            .as_ref()
+            .map(|a| serde_json::Value::Object(a.clone()));
+        let category = categorize_tool(&tool_name);
+
+        let fut = async move {
+            let processed_result =
+                super::large_response_handler::process_tool_response(result.result.await);
+            let event = match &processed_result {
+                Ok(call_result) if call_result.is_error != Some(true) => {
+                    crate::hooks::HookEvent::PostToolUse
+                }
+                _ => crate::hooks::HookEvent::PostToolUseFailure,
+            };
+
+            if hook_manager.has_hooks(event) {
+                let ctx = crate::hooks::HookContext::new(event, &session_id)
+                    .with_tool(tool_name.clone(), tool_input.clone())
+                    .with_working_dir(working_dir.clone());
+                hook_manager.emit(event, ctx).await;
+            }
+
+            if event == crate::hooks::HookEvent::PostToolUse {
+                let extended = match category {
+                    ToolCategory::Shell => Some((
+                        crate::hooks::HookEvent::AfterShellExecution,
+                        tool_input
+                            .as_ref()
+                            .and_then(|v| extract_string_arg(v, &["command"])),
+                    )),
+                    ToolCategory::Write => Some((
+                        crate::hooks::HookEvent::AfterFileEdit,
+                        tool_input
+                            .as_ref()
+                            .and_then(|v| extract_string_arg(v, &["path", "file", "file_path"])),
+                    )),
+                    _ => None,
+                };
+                if let Some((ext_event, Some(matcher))) = extended {
+                    if hook_manager.has_hooks(ext_event) {
+                        let mut ctx = crate::hooks::HookContext::new(ext_event, &session_id)
+                            .with_tool(tool_name, tool_input)
+                            .with_working_dir(working_dir);
+                        ctx.matcher_context = Some(matcher);
+                        hook_manager.emit(ext_event, ctx).await;
+                    }
+                }
+            }
+
+            processed_result
+        };
+
+        ToolCallResult {
+            notification_stream: result.notification_stream,
+            result: Box::new(fut.boxed()),
         }
     }
 
@@ -356,6 +610,20 @@ impl Agent {
         messages
     }
 
+    async fn load_project_instructions(&self, session: &Session) -> Option<String> {
+        let project_id = session.project_id.as_deref()?;
+        let entry = crate::sources::read_project(project_id).ok()?;
+        let mut parts = Vec::new();
+        parts.push(format!("# Project: {}", entry.name));
+        if !entry.description.is_empty() {
+            parts.push(entry.description.clone());
+        }
+        if !entry.content.is_empty() {
+            parts.push(entry.content.clone());
+        }
+        Some(parts.join("\n\n"))
+    }
+
     async fn prepare_reply_context(
         &self,
         session_id: &str,
@@ -376,16 +644,9 @@ impl Agent {
         }
         let initial_messages = conversation.messages().clone();
 
-        let (tools, toolshim_tools, mut system_prompt) = self
+        let (tools, toolshim_tools, system_prompt) = self
             .prepare_tools_and_prompt(session_id, working_dir)
             .await?;
-
-        if let Some(instructions) = self.resolve_at_mention(&conversation, working_dir) {
-            system_prompt = format!(
-                "{}\n\n# Instructions from active agent:\n\n{}",
-                system_prompt, instructions
-            );
-        }
 
         let goose_mode = *self.current_goose_mode.lock().await;
 
@@ -418,30 +679,6 @@ impl Agent {
             tool_call_cut_off,
             initial_messages,
         })
-    }
-
-    fn resolve_at_mention(
-        &self,
-        conversation: &Conversation,
-        working_dir: &std::path::Path,
-    ) -> Option<String> {
-        let last_message = conversation.messages().last()?;
-        if last_message.role == rmcp::model::Role::User {
-            let after_at = last_message
-                .as_concat_text()
-                .trim()
-                .strip_prefix('@')?
-                .to_lowercase();
-
-            for source in discover_filesystem_sources(working_dir) {
-                let name = source.name.to_lowercase();
-                let is_match = after_at == name || after_at.starts_with(&format!("{} ", name));
-                if is_match && !source.content.is_empty() {
-                    return Some(source.content.clone());
-                }
-            }
-        }
-        None
     }
 
     async fn categorize_tools(
@@ -548,6 +785,111 @@ impl Agent {
         self.frontend_tools.lock().await.get(name).cloned()
     }
 
+    async fn frontend_extension_configs(&self) -> Vec<ExtensionConfig> {
+        let mut configs = self
+            .frontend_extensions
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        configs.sort_by_key(|config| config.key());
+        configs
+    }
+
+    async fn frontend_tools_for_extension(&self, extension_name: Option<&str>) -> Vec<Tool> {
+        let requested_extension = extension_name.map(name_to_key);
+
+        self.frontend_extension_configs()
+            .await
+            .into_iter()
+            .filter_map(|config| {
+                let include = requested_extension
+                    .as_ref()
+                    .is_none_or(|name| *name == config.key());
+
+                match config {
+                    ExtensionConfig::Frontend { tools, .. } if include => Some(tools),
+                    _ => None,
+                }
+            })
+            .flatten()
+            .collect()
+    }
+
+    async fn rebuild_frontend_derived_state(&self, extensions: &HashMap<String, ExtensionConfig>) {
+        let multiple = extensions.len() > 1;
+        let mut tools = HashMap::new();
+        let mut instructions = Vec::new();
+
+        for config in extensions.values() {
+            if let ExtensionConfig::Frontend {
+                name,
+                tools: ext_tools,
+                instructions: ext_instructions,
+                ..
+            } = config
+            {
+                for tool in ext_tools {
+                    let tool_name = tool.name.to_string();
+                    tools.insert(
+                        tool_name.clone(),
+                        FrontendTool {
+                            name: tool_name,
+                            tool: tool.clone(),
+                        },
+                    );
+                }
+
+                let text = ext_instructions
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_FRONTEND_INSTRUCTIONS.to_string());
+                instructions.push(if multiple {
+                    format!("{name}: {text}")
+                } else {
+                    text
+                });
+            }
+        }
+
+        *self.frontend_tools.lock().await = tools;
+        *self.frontend_instructions.lock().await = if instructions.is_empty() {
+            None
+        } else {
+            Some(instructions.join("\n\n"))
+        };
+    }
+
+    async fn insert_frontend_extension(&self, extension: ExtensionConfig) {
+        let mut extensions = self.frontend_extensions.lock().await;
+        extensions.insert(extension.key(), extension);
+        self.rebuild_frontend_derived_state(&extensions).await;
+    }
+
+    async fn remove_frontend_extension(&self, name: &str) {
+        let mut extensions = self.frontend_extensions.lock().await;
+        extensions.remove(&name_to_key(name));
+        self.rebuild_frontend_derived_state(&extensions).await;
+    }
+
+    async fn extension_configs_for_persistence(&self) -> Vec<ExtensionConfig> {
+        let mut extension_configs = self.extension_manager.get_extension_configs().await;
+        extension_configs.extend(self.frontend_extension_configs().await);
+        extension_configs
+    }
+
+    pub(crate) async fn total_extension_and_tool_counts(&self, session_id: &str) -> (usize, usize) {
+        let (extension_count, tool_count) = self
+            .extension_manager
+            .get_extension_and_tool_counts(session_id)
+            .await;
+
+        (
+            extension_count + self.frontend_extensions.lock().await.len(),
+            tool_count + self.frontend_tools.lock().await.len(),
+        )
+    }
+
     pub async fn add_final_output_tool(&self, response: Response) {
         let mut final_output_tool = self.final_output_tool.lock().await;
         let created_final_output_tool = FinalOutputTool::new(response);
@@ -589,22 +931,77 @@ impl Agent {
             .await
             .record_tool_arguments(&tool_call.arguments, &session.working_dir);
 
+        if self
+            .hook_manager
+            .has_hooks(crate::hooks::HookEvent::PreToolUse)
+        {
+            let ctx =
+                crate::hooks::HookContext::new(crate::hooks::HookEvent::PreToolUse, &session.id)
+                    .with_tool(
+                        tool_call.name.to_string(),
+                        tool_call
+                            .arguments
+                            .as_ref()
+                            .map(|a| serde_json::Value::Object(a.clone())),
+                    )
+                    .with_working_dir(session.working_dir.to_string_lossy().to_string());
+            if let crate::hooks::HookDecision::Deny { reason, plugin } = self
+                .hook_manager
+                .emit_blocking(crate::hooks::HookEvent::PreToolUse, ctx)
+                .await
+            {
+                return (
+                    request_id,
+                    Err(ErrorData::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "Tool call denied by policy hook `{plugin}`: {reason}. \
+                             Do not retry; this is a policy denial, not a transient failure."
+                        ),
+                        None,
+                    )),
+                );
+            }
+        }
+
+        let tool_input_for_extended = tool_call
+            .arguments
+            .as_ref()
+            .map(|a| serde_json::Value::Object(a.clone()));
+        self.emit_pre_tool_extended_hooks(
+            &tool_call.name,
+            tool_input_for_extended.as_ref(),
+            session,
+        )
+        .await;
+
         if tool_call.name == PLATFORM_MANAGE_SCHEDULE_TOOL_NAME {
             let arguments = tool_call
                 .arguments
+                .clone()
                 .map(Value::Object)
                 .unwrap_or(Value::Object(serde_json::Map::new()));
             let result = self
                 .handle_schedule_management(arguments, request_id.clone())
                 .await;
             let wrapped_result = result.map(CallToolResult::success);
-            return (request_id, Ok(ToolCallResult::from(wrapped_result)));
+            return (
+                request_id,
+                Ok(self.with_post_tool_hook(
+                    ToolCallResult::from(wrapped_result),
+                    &tool_call,
+                    session,
+                )),
+            );
         }
 
         if tool_call.name == FINAL_OUTPUT_TOOL_NAME {
             return if let Some(final_output_tool) = self.final_output_tool.lock().await.as_mut() {
                 let result = final_output_tool.execute_tool_call(tool_call.clone()).await;
-                (request_id, Ok(result))
+                (
+                    request_id,
+                    Ok(self.with_post_tool_hook(result, &tool_call, session)),
+                )
             } else {
                 (
                     request_id,
@@ -656,23 +1053,15 @@ impl Agent {
 
         (
             request_id,
-            Ok(ToolCallResult {
-                notification_stream: result.notification_stream,
-                result: Box::new(
-                    result
-                        .result
-                        .map(super::large_response_handler::process_tool_response),
-                ),
-            }),
+            Ok(self.with_post_tool_hook(result, &tool_call, session)),
         )
     }
 
     /// Save current extension state to session metadata
     /// Should be called after any extension add/remove operation
     pub async fn save_extension_state(&self, session: &SessionConfig) -> Result<()> {
-        let extension_configs = self.extension_manager.get_extension_configs().await;
-
-        let extensions_state = EnabledExtensionsState::new(extension_configs);
+        let extensions_state =
+            EnabledExtensionsState::new(self.extension_configs_for_persistence().await);
 
         let session_manager = self.config.session_manager.clone();
         let mut session_data = session_manager.get_session(&session.id, false).await?;
@@ -693,8 +1082,8 @@ impl Agent {
 
     /// Save current extension state to session by session_id
     pub async fn persist_extension_state(&self, session_id: &str) -> Result<()> {
-        let extension_configs = self.extension_manager.get_extension_configs().await;
-        let extensions_state = EnabledExtensionsState::new(extension_configs);
+        let extensions_state =
+            EnabledExtensionsState::new(self.extension_configs_for_persistence().await);
 
         let session_manager = self.config.session_manager.clone();
         let session = session_manager.get_session(session_id, false).await?;
@@ -898,30 +1287,8 @@ impl Agent {
         let working_dir = Some(session.working_dir);
 
         match &extension {
-            ExtensionConfig::Frontend {
-                tools,
-                instructions,
-                ..
-            } => {
-                // For frontend tools, just store them in the frontend_tools map
-                let mut frontend_tools = self.frontend_tools.lock().await;
-                for tool in tools {
-                    let frontend_tool = FrontendTool {
-                        name: tool.name.to_string(),
-                        tool: tool.clone(),
-                    };
-                    frontend_tools.insert(tool.name.to_string(), frontend_tool);
-                }
-                // Store instructions if provided, using "frontend" as the key
-                let mut frontend_instructions = self.frontend_instructions.lock().await;
-                if let Some(instructions) = instructions {
-                    *frontend_instructions = Some(instructions.clone());
-                } else {
-                    // Default frontend instructions if none provided
-                    *frontend_instructions = Some(
-                        "The following tools are provided directly by the frontend and will be executed by the frontend when called.".to_string(),
-                    );
-                }
+            ExtensionConfig::Frontend { .. } => {
+                self.insert_frontend_extension(extension.clone()).await;
             }
             _ => {
                 let container = self.container.lock().await;
@@ -946,6 +1313,11 @@ impl Agent {
             .await
             .unwrap_or_default();
 
+        prefixed_tools.extend(
+            self.frontend_tools_for_extension(extension_name.as_deref())
+                .await,
+        );
+
         if (extension_name.is_none() || extension_name.as_deref() == Some("platform"))
             && self.config.scheduler_service.is_some()
         {
@@ -963,6 +1335,7 @@ impl Agent {
 
     pub async fn remove_extension(&self, name: &str, session_id: &str) -> Result<()> {
         self.extension_manager.remove_extension(name).await?;
+        self.remove_frontend_extension(name).await;
 
         // Persist extension state after successful removal
         self.persist_extension_state(session_id)
@@ -976,14 +1349,22 @@ impl Agent {
     }
 
     pub async fn list_extensions(&self) -> Vec<String> {
-        self.extension_manager
+        let mut extensions = self
+            .extension_manager
             .list_extensions()
             .await
-            .expect("Failed to list extensions")
+            .expect("Failed to list extensions");
+        extensions.extend(
+            self.frontend_extension_configs()
+                .await
+                .into_iter()
+                .map(|config| config.name()),
+        );
+        extensions
     }
 
     pub async fn get_extension_configs(&self) -> Vec<ExtensionConfig> {
-        self.extension_manager.get_extension_configs().await
+        self.extension_configs_for_persistence().await
     }
 
     /// Handle a confirmation response for a tool request
@@ -1039,18 +1420,19 @@ impl Agent {
                 if let ActionRequiredData::ElicitationResponse { id, user_data } =
                     &action_required.data
                 {
-                    if let Err(e) = ActionRequiredManager::global()
+                    // Surface stale/cancelled/timed-out elicitations as a hard
+                    // error so callers (e.g. the HTTP handler) can propagate
+                    // failure to the client instead of silently reporting
+                    // success while the blocked tool call stays unblocked.
+                    // The success path returns an empty stream; an Err here
+                    // makes the contract: Ok(empty) on accept, Err on reject.
+                    ActionRequiredManager::global()
                         .submit_response(id.clone(), user_data.clone())
                         .await
-                    {
-                        let error_text = format!("Failed to submit elicitation response: {}", e);
-                        error!(error_text);
-                        return Ok(Box::pin(stream::once(async {
-                            Ok(AgentEvent::Message(
-                                Message::assistant().with_text(error_text),
-                            ))
-                        })));
-                    }
+                        .map_err(|e| {
+                            error!("Failed to submit elicitation response: {}", e);
+                            anyhow!("Failed to submit elicitation response: {}", e)
+                        })?;
                     session_manager
                         .add_message(&session_config.id, &user_message)
                         .await?;
@@ -1061,15 +1443,18 @@ impl Agent {
 
         let message_text = user_message.as_concat_text();
 
-        // Track custom slash command usage (don't track command name for privacy)
-        if message_text.trim().starts_with('/') {
-            let command = message_text.split_whitespace().next();
-            if let Some(cmd) = command {
-                if crate::slash_commands::get_recipe_for_command(cmd).is_some() {
-                    #[cfg(feature = "telemetry")]
-                    crate::posthog::emit_custom_slash_command_used();
-                }
-            }
+        if self
+            .hook_manager
+            .has_hooks(crate::hooks::HookEvent::UserPromptSubmit)
+        {
+            let ctx = crate::hooks::HookContext::new(
+                crate::hooks::HookEvent::UserPromptSubmit,
+                &session_config.id,
+            )
+            .with_message(message_text.clone());
+            self.hook_manager
+                .emit(crate::hooks::HookEvent::UserPromptSubmit, ctx)
+                .await;
         }
 
         let command_result = self
@@ -1247,19 +1632,46 @@ impl Agent {
             goose_mode,
             initial_messages,
         } = context;
+
+        if let Some(project_addendum) = self.load_project_instructions(&session).await {
+            system_prompt = format!("{system_prompt}\n\n{project_addendum}");
+        }
+
         self.reset_retry_attempts().await;
 
         let provider = self.provider().await?;
+        let provider_name = provider.get_name().to_string();
+        let requested_model = provider.get_model_config().model_name;
+        let inference = provider
+            .fetch_model_info(&requested_model)
+            .await
+            .ok()
+            .and_then(|model_info| model_info.resolved_model)
+            .map(|resolved_model| InferenceMetadata {
+                provider: provider_name,
+                requested_model,
+                resolved_model: Some(resolved_model),
+            });
         let session_manager = self.config.session_manager.clone();
         let session_id = session_config.id.clone();
         if !self.config.disable_session_naming {
+            let provider = provider.clone();
             let manager_for_spawn = session_manager.clone();
+            let session_name_update_tx = self.config.session_name_update_tx.clone();
             tokio::spawn(async move {
-                if let Err(e) = manager_for_spawn
+                match manager_for_spawn
                     .maybe_update_name(&session_id, provider)
                     .await
                 {
-                    warn!("Failed to generate session description: {}", e);
+                    Ok(Some(update)) => {
+                        if let Some(tx) = session_name_update_tx {
+                            if tx.send(update).is_err() {
+                                warn!("Failed to publish generated session name");
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => warn!("Failed to generate session description: {}", e),
                 }
             });
         }
@@ -1274,7 +1686,7 @@ impl Agent {
             .count();
 
         let working_dir = session.working_dir.clone();
-        let reply_stream_span = tracing::info_span!(target: "goose::agents::agent", "reply_stream", session.id = %session_config.id);
+        let reply_stream_span = tracing::info_span!(target: "goose::agents::agent", "reply_stream", trace_output = tracing::field::Empty, session.id = %session_config.id);
         let inner = Box::pin(async_stream::try_stream! {
             let mut turns_taken = 0u32;
             let max_turns = session_config.max_turns.unwrap_or_else(|| {
@@ -1284,21 +1696,65 @@ impl Agent {
             });
             let mut compaction_attempts = 0;
             let mut last_assistant_text = String::new();
+            let mut goal_check_pending = false;
+            let mut tool_pair_summarization_done = false;
+            let mut stop_hook_handled_for_exit = false;
+            let mut retrying_after_stop_hook_denial = false;
+            let mut consecutive_stop_hook_blocks = 0u32;
+            let stop_hook_block_cap = self.stop_hook_block_cap();
 
             loop {
                 if is_token_cancelled(&cancel_token) {
                     break;
                 }
 
-                {
-                    let guard = self.final_output_tool.lock().await;
-                    if let Some(ref output) = guard.as_ref().and_then(|fot| fot.final_output.clone()) {
-                        yield AgentEvent::Message(Message::assistant().with_text(output));
-                        break;
+                let final_output = {
+                    let mut guard = self.final_output_tool.lock().await;
+                    guard.as_mut().and_then(|fot| fot.final_output.take())
+                };
+                if let Some(output) = final_output {
+                    let message = Message::assistant().with_text(output);
+                    yield AgentEvent::Message(message.clone());
+                    session_manager.add_message(&session_config.id, &message).await?;
+                    conversation.push(message);
+
+                    let ctx = crate::hooks::HookContext::new(
+                        crate::hooks::HookEvent::Stop,
+                        &session_config.id,
+                    );
+                    match self
+                        .hook_manager
+                        .emit_blocking(crate::hooks::HookEvent::Stop, ctx)
+                        .await
+                    {
+                        crate::hooks::HookDecision::Allow => {
+                            stop_hook_handled_for_exit = true;
+                            break;
+                        }
+                        crate::hooks::HookDecision::Deny { reason, plugin } => {
+                            consecutive_stop_hook_blocks += 1;
+                            if consecutive_stop_hook_blocks > stop_hook_block_cap {
+                                let message = stop_hook_block_cap_warning(&plugin, stop_hook_block_cap);
+                                session_manager.add_message(&session_config.id, &message).await?;
+                                yield AgentEvent::Message(message);
+                                stop_hook_handled_for_exit = true;
+                                break;
+                            }
+                            let message = stop_hook_denial_context_message(&plugin, &reason);
+                            session_manager.add_message(&session_config.id, &message).await?;
+                            conversation.push(message);
+                            yield AgentEvent::Message(stop_hook_denial_notification(&plugin));
+                            retrying_after_stop_hook_denial = true;
+                            continue;
+                        }
                     }
                 }
 
-                turns_taken += 1;
+                if retrying_after_stop_hook_denial {
+                    retrying_after_stop_hook_denial = false;
+                } else {
+                    turns_taken += 1;
+                }
                 if turns_taken > max_turns {
                     yield AgentEvent::Message(
                         Message::assistant().with_text(
@@ -1330,19 +1786,24 @@ impl Agent {
                     .count()
                     .saturating_sub(pre_turn_tool_count);
 
-                let tool_pair_summarization_task = crate::context_mgmt::maybe_summarize_tool_pairs(
-                    self.provider().await?,
-                    session_config.id.clone(),
-                    conversation.clone(),
-                    tool_call_cut_off,
-                    current_turn_tool_count,
-                );
+                let tool_pair_summarization_task = if tool_pair_summarization_done {
+                    None
+                } else {
+                    crate::context_mgmt::maybe_summarize_tool_pairs(
+                        self.provider().await?,
+                        session_config.id.clone(),
+                        conversation.clone(),
+                        tool_call_cut_off,
+                        current_turn_tool_count,
+                    )
+                };
 
                 let mut no_tools_called = true;
                 let mut messages_to_add = Conversation::default();
                 let mut tools_updated = false;
                 let mut did_recovery_compact_this_iteration = false;
                 let mut exit_chat = false;
+                let mut pending_final_output: Option<String> = None;
 
                 // Track whether this provider turn has already emitted visible
                 // thinking so a later tool-call chunk can suppress replayed
@@ -1374,6 +1835,17 @@ impl Agent {
                                         surfaced_thinking_in_turn,
                                     )
                                     .await;
+
+                                let filtered_response = if let Some(inference) = inference.as_ref() {
+                                    filtered_response.with_inference(inference.clone())
+                                } else {
+                                    filtered_response
+                                };
+                                let response = if let Some(inference) = inference.as_ref() {
+                                    response.with_inference(inference.clone())
+                                } else {
+                                    response
+                                };
 
                                 surfaced_thinking_in_turn |= filtered_response.content.iter().any(
                                     |content| {
@@ -1629,6 +2101,8 @@ impl Agent {
                                 }
 
                                 no_tools_called = false;
+                                // Agent is actively working — re-check goal when it next finishes
+                                goal_check_pending = false;
                             }
                         }
                         #[allow(unused_variables)]
@@ -1759,8 +2233,8 @@ impl Agent {
                     // Lock, extract state, drop guard before branching — handle_retry_logic
                     // also locks final_output_tool and tokio::sync::Mutex is not reentrant.
                     let final_output = {
-                        let guard = self.final_output_tool.lock().await;
-                        guard.as_ref().map(|fot| fot.final_output.clone())
+                        let mut guard = self.final_output_tool.lock().await;
+                        guard.as_mut().map(|fot| fot.final_output.take())
                     };
 
                     match final_output {
@@ -1771,15 +2245,52 @@ impl Agent {
                             yield AgentEvent::Message(message);
                         }
                         Some(Some(output)) => {
-                            let message = Message::assistant().with_text(output);
-                            messages_to_add.push(message.clone());
-                            yield AgentEvent::Message(message);
+                            pending_final_output = Some(output);
                             exit_chat = true;
                         }
                         None if did_recovery_compact_this_iteration => {
                             // continue from last user message after recovery compact
                         }
+                        None if self.goal.lock().await.is_some() && !goal_check_pending => {
+                            goal_check_pending = true;
+                            let goal = self.goal.lock().await.clone().unwrap();
+                            let nudge = format!(
+                                "Before finishing, check whether the following goal has been fully met:\n\n\
+                                 **Goal:** {goal}\n\n\
+                                 If not, continue working toward it."
+                            );
+                            let message = Message::user().with_text(&nudge)
+                                .with_visibility(false, true);
+                            messages_to_add.push(message);
+                            yield AgentEvent::Message(
+                                Message::assistant().with_system_notification(
+                                    SystemNotificationType::InlineMessage,
+                                    format!("Goal: {goal}"),
+                                )
+                            );
+                        }
+
+                        None if self.grind.lock().await.is_some() => {
+                            let grind = self.grind.lock().await.clone().unwrap();
+                            let nudge = format!(
+                                "Keep working. The grind goal is not yet complete:\n\n\
+                                 **Goal:** {grind}\n\n\
+                                 Continue until it is fully done."
+                            );
+                            let message = Message::user().with_text(&nudge)
+                                .with_visibility(false, true);
+                            messages_to_add.push(message);
+                            yield AgentEvent::Message(
+                                Message::assistant().with_system_notification(
+                                    SystemNotificationType::InlineMessage,
+                                    format!("Grind: {grind}"),
+                                )
+                            );
+                        }
+
                         None => {
+                            self.set_goal(None).await;
+                            self.set_grind(None).await;
                             match self.handle_retry_logic(&mut conversation, &session_config, &initial_messages).await {
                                 Ok(should_retry) => {
                                     if should_retry {
@@ -1806,54 +2317,104 @@ impl Agent {
                 }
 
                 if is_token_cancelled(&cancel_token) {
-                    tool_pair_summarization_task.abort();
+                    if let Some(ref task) = tool_pair_summarization_task {
+                        task.abort();
+                    }
                 }
 
-                if let Ok(summaries) = tool_pair_summarization_task.await {
-                    let mut updated_messages = conversation.messages().clone();
-
-                    for (summary_msg, tool_id) in summaries {
-                        let matching: Vec<&mut Message> = updated_messages
-                            .iter_mut()
-                            .filter(|msg| {
-                                msg.id.is_some() && msg.content.iter().any(|c| match c {
-                                    MessageContent::ToolRequest(req) => req.id == tool_id,
-                                    MessageContent::ToolResponse(resp) => resp.id == tool_id,
-                                    _ => false,
+                if let Some(task) = tool_pair_summarization_task {
+                    tool_pair_summarization_done = true;
+                    if let Ok(summaries) = task.await {
+                        for (summary_msg, tool_id) in summaries {
+                            let matching_ids: Vec<String> = conversation.messages()
+                                .iter()
+                                .filter(|msg| {
+                                    msg.id.is_some() && msg.content.iter().any(|c| match c {
+                                        MessageContent::ToolRequest(req) => req.id == tool_id,
+                                        MessageContent::ToolResponse(resp) => resp.id == tool_id,
+                                        _ => false,
+                                    })
                                 })
-                            })
-                            .collect();
+                                .filter_map(|msg| msg.id.clone())
+                                .collect();
 
-                        if matching.len() == 2 {
-                            for msg in matching {
-                                let id = msg.id.as_ref().unwrap();
-                                msg.metadata = msg.metadata.with_agent_invisible();
-                                SessionManager::update_message_metadata(&session_config.id, id, |metadata| {
-                                    metadata.with_agent_invisible()
-                                }).await?;
+                            if matching_ids.len() == 2 {
+                                for id in &matching_ids {
+                                    SessionManager::update_message_metadata(&session_config.id, id, |metadata| {
+                                        metadata.with_agent_invisible()
+                                    }).await?;
+                                }
+                                session_manager.add_message(&session_config.id, &summary_msg).await?;
+                            } else {
+                                warn!("Expected a tool request/reply pair, but found {} matching messages",
+                                    matching_ids.len());
                             }
-                            messages_to_add.push(summary_msg);
-                        } else {
-                            warn!("Expected a tool request/reply pair, but found {} matching messages",
-                                matching.len());
                         }
                     }
-                    conversation = Conversation::new_unvalidated(updated_messages);
                 }
+
+                if let Some(output) = pending_final_output.take() {
+                    let message = Message::assistant().with_text(output);
+                    messages_to_add.push(message.clone());
+                    yield AgentEvent::Message(message);
+                }
+
+                let messages_to_add = if let Some(ref inference) = inference {
+                    Conversation::new_unvalidated(
+                        messages_to_add
+                            .into_iter()
+                            .map(|message| message.with_inference_if_assistant(inference.clone())),
+                    )
+                } else {
+                    messages_to_add
+                };
 
                 for msg in &messages_to_add {
                     session_manager.add_message(&session_config.id, msg).await?;
                 }
                 conversation.extend(messages_to_add);
+
                 if exit_chat {
-                    break;
+                    let ctx = crate::hooks::HookContext::new(
+                        crate::hooks::HookEvent::Stop,
+                        &session_config.id,
+                    );
+                    match self
+                        .hook_manager
+                        .emit_blocking(crate::hooks::HookEvent::Stop, ctx)
+                        .await
+                    {
+                        crate::hooks::HookDecision::Allow => {
+                            stop_hook_handled_for_exit = true;
+                            break;
+                        }
+                        crate::hooks::HookDecision::Deny { reason, plugin } => {
+                            consecutive_stop_hook_blocks += 1;
+                            if consecutive_stop_hook_blocks > stop_hook_block_cap {
+                                let message = stop_hook_block_cap_warning(&plugin, stop_hook_block_cap);
+                                session_manager.add_message(&session_config.id, &message).await?;
+                                yield AgentEvent::Message(message);
+                                stop_hook_handled_for_exit = true;
+                                break;
+                            }
+                            let message = stop_hook_denial_context_message(&plugin, &reason);
+                            session_manager.add_message(&session_config.id, &message).await?;
+                            conversation.push(message);
+                            yield AgentEvent::Message(stop_hook_denial_notification(&plugin));
+                            retrying_after_stop_hook_denial = true;
+                        }
+                    }
                 }
 
                 tokio::task::yield_now().await;
             }
 
             if !last_assistant_text.is_empty() {
-                tracing::info!(target: "goose::agents::agent", trace_output = last_assistant_text.as_str());
+                tracing::Span::current().record("trace_output", last_assistant_text.as_str());
+            }
+
+            if !stop_hook_handled_for_exit {
+                self.emit_hook(crate::hooks::HookEvent::Stop, &session_config.id).await;
             }
         }.instrument(reply_stream_span));
         Ok(inner)
@@ -1862,6 +2423,27 @@ impl Agent {
     pub async fn extend_system_prompt(&self, key: String, instruction: String) {
         let mut prompt_manager = self.prompt_manager.lock().await;
         prompt_manager.add_system_prompt_extra(key, instruction);
+    }
+
+    pub async fn remove_system_prompt_extra(&self, key: &str) {
+        let mut prompt_manager = self.prompt_manager.lock().await;
+        prompt_manager.remove_system_prompt_extra(key);
+    }
+
+    pub async fn set_goal(&self, goal: Option<String>) {
+        *self.goal.lock().await = goal;
+    }
+
+    pub async fn get_goal(&self) -> Option<String> {
+        self.goal.lock().await.clone()
+    }
+
+    pub async fn set_grind(&self, goal: Option<String>) {
+        *self.grind.lock().await = goal;
+    }
+
+    pub async fn get_grind(&self) -> Option<String> {
+        self.grind.lock().await.clone()
     }
 
     pub async fn update_provider(
@@ -2018,6 +2600,11 @@ impl Agent {
         prompt_manager.set_system_prompt_override(template);
     }
 
+    pub async fn clear_system_prompt_override(&self) {
+        let mut prompt_manager = self.prompt_manager.lock().await;
+        prompt_manager.clear_system_prompt_override();
+    }
+
     pub async fn list_extension_prompts(&self, session_id: &str) -> HashMap<String, Vec<Prompt>> {
         self.extension_manager
             .list_prompts(session_id, CancellationToken::default())
@@ -2107,10 +2694,7 @@ impl Agent {
             .get_extensions_info(&session.working_dir)
             .await;
         tracing::debug!("Retrieved {} extensions info", extensions_info.len());
-        let (extension_count, tool_count) = self
-            .extension_manager
-            .get_extension_and_tool_counts(session_id)
-            .await;
+        let (extension_count, tool_count) = self.total_extension_and_tool_counts(session_id).await;
 
         // Get model name from provider
         let provider = self.provider().await.map_err(|e| {
@@ -2337,8 +2921,17 @@ impl Agent {
 mod tests {
     use super::*;
     use crate::permission::permission_confirmation::PrincipalType;
-    use crate::providers::base::PermissionRouting;
+    use crate::plugins::discovery::{DiscoveredPlugin, PluginScope};
+    use crate::providers::base::{
+        stream_from_single_message, MessageStream, PermissionRouting, ProviderUsage, Usage,
+    };
+    use crate::providers::errors::ProviderError;
     use crate::recipe::Response;
+    use crate::session::session_manager::SessionType;
+    use rmcp::model::Tool;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::TempDir;
 
     struct ActionRequiredProvider {
         handled: tokio::sync::Mutex<Vec<(String, PermissionConfirmation)>>,
@@ -2456,6 +3049,252 @@ mod tests {
         assert_eq!(conf.permission, crate::permission::Permission::AllowOnce);
     }
 
+    const ALWAYS_BLOCK_SCRIPT: &str = r#"#!/bin/sh
+echo blocked >> "$PLUGIN_ROOT/hook.log"
+echo "always block" >&2
+exit 2
+"#;
+
+    const ALTERNATE_BLOCK_ALLOW_SCRIPT: &str = r#"#!/bin/sh
+count_file="$PLUGIN_ROOT/count"
+count=0
+if [ -f "$count_file" ]; then
+  count=$(cat "$count_file")
+fi
+count=$((count + 1))
+echo "$count" > "$count_file"
+echo "$count" >> "$PLUGIN_ROOT/hook.log"
+if [ $((count % 2)) -eq 1 ]; then
+  echo "block $count" >&2
+  exit 2
+fi
+exit 0
+"#;
+
+    struct StopHookTestEnv {
+        temp_dir: TempDir,
+        hook_log: PathBuf,
+    }
+
+    impl StopHookTestEnv {
+        fn new(script: &str) -> Result<Self> {
+            let temp_dir = tempfile::tempdir()?;
+            let plugin_dir = temp_dir.path().join("stop-blocker");
+            std::fs::create_dir_all(plugin_dir.join("hooks"))?;
+            std::fs::write(
+                plugin_dir.join("hooks/hooks.json"),
+                r#"{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "sh ${PLUGIN_ROOT}/block.sh" }
+        ]
+      }
+    ]
+  }
+}
+"#,
+            )?;
+            std::fs::write(plugin_dir.join("block.sh"), script)?;
+
+            Ok(Self {
+                temp_dir,
+                hook_log: plugin_dir.join("hook.log"),
+            })
+        }
+
+        fn hook_manager(&self) -> crate::hooks::HookManager {
+            crate::hooks::HookManager::from_plugins_for_test(vec![DiscoveredPlugin {
+                name: "stop-blocker".into(),
+                root: self.temp_dir.path().join("stop-blocker"),
+                scope: PluginScope::Project,
+            }])
+        }
+
+        fn data_dir(&self) -> PathBuf {
+            self.temp_dir.path().join("data")
+        }
+
+        fn hook_invocations(&self) -> usize {
+            std::fs::read_to_string(&self.hook_log)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        }
+    }
+
+    struct CountingTextProvider {
+        call_count: AtomicUsize,
+    }
+
+    impl CountingTextProvider {
+        fn new() -> Self {
+            Self {
+                call_count: AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::providers::base::Provider for CountingTextProvider {
+        async fn stream(
+            &self,
+            _model_config: &crate::model::ModelConfig,
+            _session_id: &str,
+            _system_prompt: &str,
+            _messages: &[Message],
+            _tools: &[Tool],
+        ) -> Result<MessageStream, ProviderError> {
+            let call = self.call_count.fetch_add(1, Ordering::SeqCst);
+            let message = Message::assistant().with_text(format!("provider response {call}"));
+            let usage = ProviderUsage::new("mock-model".to_string(), Usage::default());
+            Ok(stream_from_single_message(message, usage))
+        }
+
+        fn get_model_config(&self) -> crate::model::ModelConfig {
+            crate::model::ModelConfig::new("mock-model").unwrap()
+        }
+
+        fn get_name(&self) -> &str {
+            "counting-text"
+        }
+    }
+
+    async fn create_stop_hook_test_agent(
+        env: &StopHookTestEnv,
+        stop_hook_block_cap: u32,
+    ) -> Result<(Agent, String, Arc<CountingTextProvider>)> {
+        let session_manager = Arc::new(SessionManager::new(env.data_dir()));
+        let permission_manager = Arc::new(PermissionManager::new(env.data_dir()));
+        let config = AgentConfig::new(
+            session_manager.clone(),
+            permission_manager,
+            None,
+            GooseMode::Auto,
+            true,
+            GoosePlatform::GooseCli,
+        );
+        let mut agent = Agent::with_config(config);
+        agent.set_hook_manager_for_test(env.hook_manager());
+        agent.set_stop_hook_block_cap_for_test(stop_hook_block_cap);
+        let provider = Arc::new(CountingTextProvider::new());
+        let session = session_manager
+            .create_session(
+                PathBuf::default(),
+                "stop-hook-test".to_string(),
+                SessionType::Hidden,
+                GooseMode::Auto,
+            )
+            .await?;
+        agent.update_provider(provider.clone(), &session.id).await?;
+        Ok((agent, session.id, provider))
+    }
+
+    async fn run_stop_hook_test_turn(
+        agent: &Agent,
+        session_id: &str,
+        text: &str,
+    ) -> Result<Vec<Message>> {
+        let session_config = SessionConfig {
+            id: session_id.to_string(),
+            schedule_id: None,
+            max_turns: Some(10),
+            retry_config: None,
+        };
+        let reply_stream = agent
+            .reply(Message::user().with_text(text), session_config, None)
+            .await?;
+        tokio::pin!(reply_stream);
+
+        let mut messages = Vec::new();
+        while let Some(event) = reply_stream.next().await {
+            match event? {
+                AgentEvent::Message(message) => messages.push(message),
+                AgentEvent::McpNotification(_) | AgentEvent::HistoryReplaced(_) => {}
+            }
+        }
+        Ok(messages)
+    }
+
+    fn visible_texts(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .map(Message::as_concat_text)
+            .filter(|text| !text.is_empty())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn stop_hook_block_cap_allows_configured_consecutive_blocks_then_overrides() -> Result<()>
+    {
+        let env = StopHookTestEnv::new(ALWAYS_BLOCK_SCRIPT)?;
+        let (agent, session_id, provider) = create_stop_hook_test_agent(&env, 2).await?;
+
+        let messages = run_stop_hook_test_turn(&agent, &session_id, "hello").await?;
+        let texts = visible_texts(&messages);
+
+        assert_eq!(
+            provider.call_count(),
+            3,
+            "cap=2 should allow two blocked retries, then override on the third block"
+        );
+        assert_eq!(
+            env.hook_invocations(),
+            3,
+            "Stop hook should run for the initial response plus the two honored retries"
+        );
+        assert!(texts.iter().any(|text| text == "provider response 0"));
+        assert!(texts.iter().any(|text| text == "provider response 1"));
+        assert!(texts.iter().any(|text| text == "provider response 2"));
+        assert!(messages.iter().any(|message| {
+            message.content.iter().any(|content| {
+                matches!(
+                    content,
+                    MessageContent::SystemNotification(notification)
+                        if notification.msg.contains("more than 2 consecutive times")
+                            && notification.msg.contains("GOOSE_STOP_HOOK_BLOCK_CAP")
+                )
+            })
+        }));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stop_hook_block_cap_counts_only_consecutive_blocks() -> Result<()> {
+        let env = StopHookTestEnv::new(ALTERNATE_BLOCK_ALLOW_SCRIPT)?;
+        let (agent, session_id, provider) = create_stop_hook_test_agent(&env, 1).await?;
+
+        let first_turn = run_stop_hook_test_turn(&agent, &session_id, "first").await?;
+        let second_turn = run_stop_hook_test_turn(&agent, &session_id, "second").await?;
+        let mut texts = visible_texts(&first_turn);
+        texts.extend(visible_texts(&second_turn));
+
+        assert_eq!(
+            provider.call_count(),
+            4,
+            "each turn should honor one block, retry, then stop when the next Stop hook allows"
+        );
+        assert_eq!(env.hook_invocations(), 4);
+        assert!(texts.iter().any(|text| text == "provider response 0"));
+        assert!(texts.iter().any(|text| text == "provider response 1"));
+        assert!(texts.iter().any(|text| text == "provider response 2"));
+        assert!(texts.iter().any(|text| text == "provider response 3"));
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("overriding and ending turn")),
+            "non-consecutive Stop hook blocks should not trip the cap warning"
+        );
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_add_final_output_tool() -> Result<()> {
         let agent = Agent::new();
@@ -2519,5 +3358,35 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn categorize_tool_recognizes_conventional_names() {
+        assert_eq!(categorize_tool("developer__shell"), ToolCategory::Shell);
+        assert_eq!(categorize_tool("filesystem__write"), ToolCategory::Write);
+        assert_eq!(categorize_tool("filesystem__edit"), ToolCategory::Write);
+        assert_eq!(categorize_tool("filesystem__read"), ToolCategory::Read);
+        assert_eq!(categorize_tool("filesystem__view"), ToolCategory::Read);
+        assert_eq!(categorize_tool("filesystem__cat"), ToolCategory::Read);
+        assert_eq!(categorize_tool("scheduler__list"), ToolCategory::Other);
+        assert_eq!(categorize_tool("shell"), ToolCategory::Shell);
+    }
+
+    #[test]
+    fn extract_string_arg_picks_first_present_key() {
+        let input = serde_json::json!({ "file_path": "/tmp/a.txt", "path": "/tmp/b.txt" });
+        assert_eq!(
+            extract_string_arg(&input, &["path", "file", "file_path"]).as_deref(),
+            Some("/tmp/b.txt")
+        );
+        let input = serde_json::json!({ "file_path": "/tmp/a.txt" });
+        assert_eq!(
+            extract_string_arg(&input, &["path", "file", "file_path"]).as_deref(),
+            Some("/tmp/a.txt")
+        );
+        let input = serde_json::json!({ "other": 1 });
+        assert!(extract_string_arg(&input, &["path"]).is_none());
+        let input = serde_json::json!({ "path": "" });
+        assert!(extract_string_arg(&input, &["path"]).is_none());
     }
 }

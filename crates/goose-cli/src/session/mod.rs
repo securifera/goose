@@ -65,6 +65,10 @@ struct JsonOutput {
 #[derive(Serialize, Deserialize, Debug)]
 struct JsonMetadata {
     total_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_tokens: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_tokens: Option<i32>,
     status: String,
 }
 
@@ -84,6 +88,10 @@ enum StreamEvent {
     },
     Complete {
         total_tokens: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_tokens: Option<i32>,
     },
 }
 
@@ -231,36 +239,6 @@ pub async fn classify_planner_response(
     }
 }
 
-pub fn split_quoted(input: &str) -> Result<Vec<String>> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut in_double_quote = false;
-    let mut in_single_quote = false;
-
-    for c in input.chars() {
-        match c {
-            '"' if !in_single_quote => in_double_quote = !in_double_quote,
-            '\'' if !in_double_quote => in_single_quote = !in_single_quote,
-            c if c.is_whitespace() && !in_double_quote && !in_single_quote => {
-                if !current.is_empty() {
-                    parts.push(std::mem::take(&mut current));
-                }
-            }
-            _ => current.push(c),
-        }
-    }
-
-    if in_double_quote || in_single_quote {
-        return Err(anyhow::anyhow!("Unmatched quote in command"));
-    }
-
-    if !current.is_empty() {
-        parts.push(current);
-    }
-
-    Ok(parts)
-}
-
 impl CliSession {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
@@ -303,7 +281,7 @@ impl CliSession {
     /// Parse a stdio extension command string into an ExtensionConfig
     /// Format: "ENV1=val1 ENV2=val2 command args..."
     pub fn parse_stdio_extension(extension_command: &str) -> Result<ExtensionConfig> {
-        let mut parts = split_quoted(extension_command)?;
+        let mut parts = goose::utils::split_command_args(extension_command)?;
         let mut envs = HashMap::new();
 
         while let Some(part) = parts.first() {
@@ -500,6 +478,28 @@ impl CliSession {
 
     /// Start an interactive session, optionally with an initial message
     pub async fn interactive(&mut self, prompt: Option<String>) -> Result<()> {
+        self.agent
+            .emit_hook(goose::hooks::HookEvent::SessionStart, &self.session_id)
+            .await;
+
+        let result = self.run_interactive(prompt).await;
+
+        self.agent
+            .emit_hook(goose::hooks::HookEvent::SessionEnd, &self.session_id)
+            .await;
+
+        if result.is_ok() {
+            println!(
+                "\n  {} {}",
+                console::style("●").red(),
+                console::style(format!("session closed · {}", &self.session_id)).dim()
+            );
+        }
+
+        result
+    }
+
+    async fn run_interactive(&mut self, prompt: Option<String>) -> Result<()> {
         if let Some(prompt) = prompt {
             let msg = Message::user().with_text(&prompt);
             self.process_message(msg, CancellationToken::default(), true)
@@ -535,12 +535,6 @@ impl CliSession {
             self.handle_input(input, &history_manager, &mut editor, &conversation_strings)
                 .await?;
         }
-
-        println!(
-            "\n  {} {}",
-            console::style("●").red(),
-            console::style(format!("session closed · {}", &self.session_id)).dim()
-        );
 
         Ok(())
     }
@@ -613,6 +607,10 @@ impl CliSession {
             InputResult::GooseMode(mode) => {
                 history.save(editor);
                 self.handle_goose_mode(&mode).await?;
+            }
+            InputResult::Model(model) => {
+                history.save(editor);
+                self.handle_model(model.as_deref()).await?;
             }
             InputResult::Plan(options) => {
                 self.handle_plan_mode(options).await?;
@@ -801,6 +799,73 @@ impl CliSession {
         Ok(())
     }
 
+    async fn handle_model(&self, model: Option<&str>) -> Result<()> {
+        let provider = self.agent.provider().await?;
+        let current_provider_name = provider.get_name().to_string();
+        let current_model_config = provider.get_model_config();
+        let current_model_name = current_model_config.model_name.clone();
+
+        if model.is_none() {
+            output::goose_mode_message(&format!(
+                "Current session model: '{}' (provider '{}')",
+                current_model_name, current_provider_name
+            ));
+            return Ok(());
+        }
+
+        let model_name = model.unwrap_or_default().trim();
+        if model_name.is_empty() {
+            output::render_error("Model name cannot be empty");
+            return Ok(());
+        }
+
+        if current_provider_name.ends_with("-acp") {
+            output::render_error(
+                "Session model switching is not supported for ACP providers in the CLI.",
+            );
+            return Ok(());
+        }
+
+        if provider.manages_own_context() {
+            output::render_error(&format!(
+                "Session model switching is not supported for provider '{}' because it manages its own conversation context.",
+                current_provider_name
+            ));
+            return Ok(());
+        }
+
+        let new_model_config =
+            build_switched_model_config(&current_provider_name, model_name, &current_model_config)?;
+
+        if new_model_config.model_name == current_model_config.model_name
+            && new_model_config.thinking_effort() == current_model_config.thinking_effort()
+        {
+            output::goose_mode_message(&format!(
+                "Session already using model '{}' for provider '{}'",
+                current_model_name, current_provider_name
+            ));
+            return Ok(());
+        }
+
+        let extensions = self.agent.get_extension_configs().await;
+        let new_provider =
+            goose::providers::create(&current_provider_name, new_model_config, extensions)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create provider: {e}"))?;
+
+        self.agent
+            .update_provider(new_provider, &self.session_id)
+            .await?;
+
+        let mode = self.agent.goose_mode().await;
+        self.agent.update_goose_mode(mode, &self.session_id).await?;
+        output::goose_mode_message(&format!(
+            "Session model switched from '{}' to '{}' for provider '{}'",
+            current_model_name, model_name, current_provider_name
+        ));
+        Ok(())
+    }
+
     async fn handle_plan_mode(&mut self, options: input::PlanCommandOptions) -> Result<()> {
         self.run_mode = RunMode::Plan;
         output::render_enter_plan_mode();
@@ -907,6 +972,7 @@ impl CliSession {
 
     async fn handle_list_skills(&mut self) -> Result<()> {
         use comfy_table::{presets, Cell, ContentArrangement, Table};
+        use goose::custom_requests::SourceType;
         use goose::skills::list_installed_skills;
         let cwd = std::env::current_dir().unwrap_or_default();
         let skills = list_installed_skills(Some(&cwd));
@@ -919,13 +985,24 @@ impl CliSession {
         let mut table = Table::new();
         table.set_content_arrangement(ContentArrangement::Dynamic);
         table.load_preset(presets::ASCII_FULL);
-        table.set_header(vec!["Skill", "Description"]);
+        table.set_header(vec!["Skill", "Location", "Description"]);
 
         let mut sorted_skills = skills;
         sorted_skills.sort_by(|a, b| a.name.cmp(&b.name));
 
         for skill in &sorted_skills {
-            table.add_row(vec![Cell::new(&skill.name), Cell::new(&skill.description)]);
+            let location = if skill.source_type == SourceType::BuiltinSkill {
+                "built-in"
+            } else if skill.global {
+                "global"
+            } else {
+                "project"
+            };
+            table.add_row(vec![
+                Cell::new(&skill.name),
+                Cell::new(location),
+                Cell::new(&skill.description),
+            ]);
         }
 
         println!("{table}");
@@ -1044,9 +1121,17 @@ impl CliSession {
 
     /// Process a single message and exit
     pub async fn headless(&mut self, prompt: String) -> Result<()> {
+        self.agent
+            .emit_hook(goose::hooks::HookEvent::SessionStart, &self.session_id)
+            .await;
         let message = Message::user().with_text(&prompt);
-        self.process_message(message, CancellationToken::default(), false)
-            .await?;
+        let result = self
+            .process_message(message, CancellationToken::default(), false)
+            .await;
+        self.agent
+            .emit_hook(goose::hooks::HookEvent::SessionEnd, &self.session_id)
+            .await;
+        result?;
         Ok(())
     }
 
@@ -1265,11 +1350,15 @@ impl CliSession {
                 .await
             {
                 Ok(session) => JsonMetadata {
-                    total_tokens: session.total_tokens,
+                    total_tokens: session.accumulated_total_tokens.or(session.total_tokens),
+                    input_tokens: session.accumulated_input_tokens.or(session.input_tokens),
+                    output_tokens: session.accumulated_output_tokens.or(session.output_tokens),
                     status: "completed".to_string(),
                 },
                 Err(_) => JsonMetadata {
                     total_tokens: None,
+                    input_tokens: None,
+                    output_tokens: None,
                     status: "completed".to_string(),
                 },
             };
@@ -1279,15 +1368,26 @@ impl CliSession {
             };
             println!("{}", serde_json::to_string_pretty(&json_output)?);
         } else if is_stream_json_mode {
-            let total_tokens = self
+            let session = self
                 .agent
                 .config
                 .session_manager
                 .get_session(&self.session_id, false)
                 .await
-                .ok()
-                .and_then(|s| s.total_tokens);
-            emit_stream_event(&StreamEvent::Complete { total_tokens });
+                .ok();
+            let (total_tokens, input_tokens, output_tokens) = match session {
+                Some(s) => (
+                    s.accumulated_total_tokens.or(s.total_tokens),
+                    s.accumulated_input_tokens.or(s.input_tokens),
+                    s.accumulated_output_tokens.or(s.output_tokens),
+                ),
+                None => (None, None, None),
+            };
+            emit_stream_event(&StreamEvent::Complete {
+                total_tokens,
+                input_tokens,
+                output_tokens,
+            });
         } else {
             println!();
         }
@@ -1442,10 +1542,9 @@ impl CliSession {
             .await
     }
 
-    // Get the session's total token usage
     pub async fn get_total_token_usage(&self) -> Result<Option<i32>> {
         let metadata = self.get_session().await?;
-        Ok(metadata.total_tokens)
+        Ok(metadata.accumulated_total_tokens)
     }
 
     /// Display enhanced context usage with session totals
@@ -2063,11 +2162,28 @@ fn format_elapsed_time(duration: std::time::Duration) -> String {
     }
 }
 
+fn build_switched_model_config(
+    provider_name: &str,
+    model_name: &str,
+    current_model_config: &goose::model::ModelConfig,
+) -> Result<goose::model::ModelConfig> {
+    goose::model::ModelConfig::new(model_name)
+        .map(|config| {
+            config
+                .with_canonical_limits(provider_name)
+                .with_temperature(current_model_config.temperature)
+                .with_toolshim(current_model_config.toolshim)
+                .with_toolshim_model(current_model_config.toolshim_model.clone())
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to create model configuration: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use goose::agents::extension::Envs;
     use goose::config::ExtensionConfig;
+    use std::collections::HashMap;
     use std::time::Duration;
     use test_case::test_case;
 
@@ -2192,20 +2308,88 @@ mod tests {
     }
 
     #[test]
-    fn test_split_quoted_windows_paths() {
+    fn test_build_switched_model_config_rebuilds_target_model_settings() {
+        let _guard = env_lock::lock_env([
+            ("GOOSE_MAX_TOKENS", None::<&str>),
+            ("GOOSE_TEMPERATURE", None::<&str>),
+            ("GOOSE_CONTEXT_LIMIT", None::<&str>),
+            ("GOOSE_TOOLSHIM", None::<&str>),
+            ("GOOSE_TOOLSHIM_OLLAMA_MODEL", None::<&str>),
+        ]);
+
+        let current_model_config = goose::model::ModelConfig {
+            model_name: "gpt-4o".to_string(),
+            context_limit: Some(128_000),
+            temperature: Some(0.25),
+            max_tokens: Some(16_384),
+            toolshim: true,
+            toolshim_model: Some("qwen2.5-coder".to_string()),
+            fast_model_config: None,
+            request_params: Some(HashMap::from([(
+                "anthropic_beta".to_string(),
+                serde_json::json!(["output-128k-2025-02-19"]),
+            )])),
+            reasoning: Some(false),
+        };
+
+        let switched =
+            build_switched_model_config("openai", "gpt-5.4", &current_model_config).unwrap();
+        let expected = goose::model::ModelConfig::new_or_fail("gpt-5.4")
+            .with_canonical_limits("openai")
+            .with_temperature(Some(0.25))
+            .with_toolshim(true)
+            .with_toolshim_model(Some("qwen2.5-coder".to_string()));
+
+        assert_eq!(switched.model_name, expected.model_name);
+        assert_eq!(switched.context_limit, expected.context_limit);
+        assert_eq!(switched.max_tokens, expected.max_tokens);
+        assert_eq!(switched.request_params, expected.request_params);
+        assert_eq!(switched.reasoning, expected.reasoning);
+        assert_eq!(switched.temperature, Some(0.25));
+        assert!(switched.toolshim);
+        assert_eq!(switched.toolshim_model.as_deref(), Some("qwen2.5-coder"));
+    }
+
+    #[test]
+    fn test_build_switched_model_config_detects_effort_suffix_change() {
+        let _guard = env_lock::lock_env([
+            ("GOOSE_MAX_TOKENS", None::<&str>),
+            ("GOOSE_TEMPERATURE", None::<&str>),
+            ("GOOSE_CONTEXT_LIMIT", None::<&str>),
+            ("GOOSE_TOOLSHIM", None::<&str>),
+            ("GOOSE_TOOLSHIM_OLLAMA_MODEL", None::<&str>),
+            ("GOOSE_THINKING_EFFORT", None::<&str>),
+        ]);
+
+        let current =
+            goose::model::ModelConfig::new_or_fail("gpt-5.4-high").with_canonical_limits("openai");
+        assert_eq!(current.model_name, "gpt-5.4");
         assert_eq!(
-            split_quoted(r"C:\tools\mcp.exe --arg value").unwrap(),
+            current.thinking_effort(),
+            Some(goose::model::ThinkingEffort::High)
+        );
+
+        let switched = build_switched_model_config("openai", "gpt-5.4", &current).unwrap();
+
+        assert_eq!(switched.model_name, current.model_name);
+        assert_ne!(switched.thinking_effort(), current.thinking_effort());
+    }
+
+    #[test]
+    fn test_split_command_args_windows_paths() {
+        assert_eq!(
+            goose::utils::split_command_args(r"C:\tools\mcp.exe --arg value").unwrap(),
             vec![r"C:\tools\mcp.exe", "--arg", "value"]
         );
         assert_eq!(
-            split_quoted(r#""C:\Program Files\server\mcp.exe" --arg"#).unwrap(),
+            goose::utils::split_command_args(r#""C:\Program Files\server\mcp.exe" --arg"#).unwrap(),
             vec![r"C:\Program Files\server\mcp.exe", "--arg"]
         );
     }
 
     #[test]
-    fn test_split_quoted_unmatched_quote() {
-        assert!(split_quoted(r#""unmatched"#).is_err());
+    fn test_split_command_args_unmatched_quote() {
+        assert!(goose::utils::split_command_args(r#""unmatched"#).is_err());
     }
 
     #[test_case(

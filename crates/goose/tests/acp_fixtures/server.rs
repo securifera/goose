@@ -2,10 +2,7 @@ use super::{
     map_permission_response, spawn_acp_server_in_process, Connection, PermissionDecision, Session,
     SessionData, TestConnectionConfig, TestOutput,
 };
-use async_trait::async_trait;
-use goose::config::PermissionManager;
-use goose_test_support::{ExpectedSessionId, IgnoreSessionId};
-use sacp::schema::{
+use agent_client_protocol::schema::{
     ClientCapabilities, CloseSessionRequest, ContentBlock, CreateTerminalRequest,
     FileSystemCapabilities, ImageContent, InitializeRequest, KillTerminalRequest,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, McpServer, ModelId, ModelInfo,
@@ -16,7 +13,10 @@ use sacp::schema::{
     StopReason, TerminalOutputRequest, TextContent, ToolCallStatus, WaitForTerminalExitRequest,
     WriteTextFileRequest,
 };
-use sacp::{Agent, Client, ConnectionTo};
+use agent_client_protocol::{Agent, Client, ConnectionTo};
+use async_trait::async_trait;
+use goose::config::PermissionManager;
+use goose_test_support::{ExpectedSessionId, IgnoreSessionId};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -37,7 +37,7 @@ pub struct AcpServerConnection {
 
 pub struct AcpServerSession {
     cx: ConnectionTo<Agent>,
-    session_id: sacp::schema::SessionId,
+    session_id: agent_client_protocol::schema::SessionId,
     updates: Arc<Mutex<Vec<SessionNotification>>>,
     permission: Arc<Mutex<PermissionDecision>>,
     notify: Arc<Notify>,
@@ -53,6 +53,15 @@ impl std::fmt::Debug for AcpServerSession {
 }
 
 impl AcpServerSession {
+    pub fn session_updates(&self) -> Vec<SessionUpdate> {
+        self.updates
+            .lock()
+            .unwrap()
+            .drain(..)
+            .map(|n| n.update)
+            .collect()
+    }
+
     async fn send_prompt(
         &mut self,
         content: Vec<ContentBlock>,
@@ -121,6 +130,7 @@ impl Connection for AcpServerConnection {
             config.goose_mode,
             config.provider_factory,
             &config.current_model,
+            config.disable_session_naming,
         )
         .await;
 
@@ -162,7 +172,7 @@ impl Connection for AcpServerConnection {
                                 Ok(())
                             }
                         },
-                        sacp::on_receive_notification!(),
+                        agent_client_protocol::on_receive_notification!(),
                     )
                     .on_receive_request(
                         {
@@ -172,7 +182,7 @@ impl Connection for AcpServerConnection {
                                 responder.respond(map_permission_response(&req, decision))
                             }
                         },
-                        sacp::on_receive_request!(),
+                        agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
                         async move |req: ReadTextFileRequest, responder, _cx| match read_handler {
@@ -180,9 +190,11 @@ impl Connection for AcpServerConnection {
                                 Ok(resp) => responder.respond(resp),
                                 Err(msg) => responder.respond_with_internal_error(msg),
                             },
-                            None => responder.respond_with_error(sacp::Error::method_not_found()),
+                            None => responder.respond_with_error(
+                                agent_client_protocol::Error::method_not_found(),
+                            ),
                         },
-                        sacp::on_receive_request!(),
+                        agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
                         async move |req: WriteTextFileRequest, responder, _cx| match write_handler {
@@ -190,21 +202,23 @@ impl Connection for AcpServerConnection {
                                 Ok(resp) => responder.respond(resp),
                                 Err(msg) => responder.respond_with_internal_error(msg),
                             },
-                            None => responder.respond_with_error(sacp::Error::method_not_found()),
+                            None => responder.respond_with_error(
+                                agent_client_protocol::Error::method_not_found(),
+                            ),
                         },
-                        sacp::on_receive_request!(),
+                        agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
                         {
                             let t = terminal.clone();
                             async move |req: CreateTerminalRequest, responder, _cx| match t {
                                 Some(ref f) => responder.respond(f.on_create(&req.command)),
-                                None => {
-                                    responder.respond_with_error(sacp::Error::method_not_found())
-                                }
+                                None => responder.respond_with_error(
+                                    agent_client_protocol::Error::method_not_found(),
+                                ),
                             }
                         },
-                        sacp::on_receive_request!(),
+                        agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
                         {
@@ -213,48 +227,48 @@ impl Connection for AcpServerConnection {
                                 Some(ref f) => {
                                     responder.respond(f.on_wait_for_exit(&req.terminal_id))
                                 }
-                                None => {
-                                    responder.respond_with_error(sacp::Error::method_not_found())
-                                }
+                                None => responder.respond_with_error(
+                                    agent_client_protocol::Error::method_not_found(),
+                                ),
                             }
                         },
-                        sacp::on_receive_request!(),
+                        agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
                         {
                             let t = terminal.clone();
                             async move |req: TerminalOutputRequest, responder, _cx| match t {
                                 Some(ref f) => responder.respond(f.on_output(&req.terminal_id)),
-                                None => {
-                                    responder.respond_with_error(sacp::Error::method_not_found())
-                                }
+                                None => responder.respond_with_error(
+                                    agent_client_protocol::Error::method_not_found(),
+                                ),
                             }
                         },
-                        sacp::on_receive_request!(),
+                        agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
                         {
                             let t = terminal.clone();
                             async move |req: ReleaseTerminalRequest, responder, _cx| match t {
                                 Some(ref f) => responder.respond(f.on_release(&req.terminal_id)),
-                                None => {
-                                    responder.respond_with_error(sacp::Error::method_not_found())
-                                }
+                                None => responder.respond_with_error(
+                                    agent_client_protocol::Error::method_not_found(),
+                                ),
                             }
                         },
-                        sacp::on_receive_request!(),
+                        agent_client_protocol::on_receive_request!(),
                     )
                     .on_receive_request(
                         {
                             let t = terminal.clone();
                             async move |req: KillTerminalRequest, responder, _cx| match t {
                                 Some(ref f) => responder.respond(f.on_kill(&req.terminal_id)),
-                                None => {
-                                    responder.respond_with_error(sacp::Error::method_not_found())
-                                }
+                                None => responder.respond_with_error(
+                                    agent_client_protocol::Error::method_not_found(),
+                                ),
                             }
                         },
-                        sacp::on_receive_request!(),
+                        agent_client_protocol::on_receive_request!(),
                     )
                     .connect_with(transport, {
                         let cx_holder = cx_holder_clone;
@@ -275,7 +289,7 @@ impl Connection for AcpServerConnection {
                             *cx_holder.lock().unwrap() = Some(cx.clone());
                             let _ = ready_tx.send(());
 
-                            std::future::pending::<Result<(), sacp::Error>>().await
+                            std::future::pending::<Result<(), agent_client_protocol::Error>>().await
                         }
                     })
                     .await;
@@ -341,7 +355,7 @@ impl Connection for AcpServerConnection {
     ) -> anyhow::Result<SessionData<AcpServerSession>> {
         self.updates.lock().unwrap().clear();
         let work_dir = tempfile::tempdir().unwrap();
-        let session_id = sacp::schema::SessionId::new(session_id.to_string());
+        let session_id = agent_client_protocol::schema::SessionId::new(session_id.to_string());
         let response = self
             .cx
             .send_request(
@@ -451,7 +465,7 @@ impl Connection for AcpServerConnection {
 
 #[async_trait]
 impl Session for AcpServerSession {
-    fn session_id(&self) -> &sacp::schema::SessionId {
+    fn session_id(&self) -> &agent_client_protocol::schema::SessionId {
         &self.session_id
     }
 
@@ -459,15 +473,12 @@ impl Session for AcpServerSession {
         self._work_dir.path().to_path_buf()
     }
 
+    fn session_updates(&self) -> Vec<SessionUpdate> {
+        AcpServerSession::session_updates(self)
+    }
+
     fn notifications(&self) -> Vec<super::Notification> {
-        let updates: Vec<_> = self
-            .updates
-            .lock()
-            .unwrap()
-            .drain(..)
-            .map(|n| n.update)
-            .collect();
-        super::to_notifications(&updates)
+        super::to_notifications(&self.session_updates())
     }
 
     async fn prompt(
@@ -498,7 +509,7 @@ impl Session for AcpServerSession {
 }
 
 fn extract_model_state_from_config_options(
-    config_options: Option<&[sacp::schema::SessionConfigOption]>,
+    config_options: Option<&[agent_client_protocol::schema::SessionConfigOption]>,
 ) -> Option<SessionModelState> {
     let option = config_options?
         .iter()
@@ -508,7 +519,7 @@ fn extract_model_state_from_config_options(
     };
 
     let available_models = match &select.options {
-        sacp::schema::SessionConfigSelectOptions::Ungrouped(options) => options
+        agent_client_protocol::schema::SessionConfigSelectOptions::Ungrouped(options) => options
             .iter()
             .map(|option| {
                 ModelInfo::new(
@@ -517,7 +528,7 @@ fn extract_model_state_from_config_options(
                 )
             })
             .collect(),
-        sacp::schema::SessionConfigSelectOptions::Grouped(groups) => groups
+        agent_client_protocol::schema::SessionConfigSelectOptions::Grouped(groups) => groups
             .iter()
             .flat_map(|group| {
                 group.options.iter().map(|option| {

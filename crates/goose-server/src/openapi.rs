@@ -5,7 +5,7 @@ use goose::config::permission::PermissionLevel;
 use goose::config::ExtensionEntry;
 use goose::conversation::Conversation;
 use goose::download_manager::{DownloadProgress, DownloadStatus};
-use goose::model::ModelConfig;
+use goose::model::{ModelConfig, ThinkingEffort};
 use goose::permission::permission_confirmation::{Permission, PrincipalType};
 use goose::providers::base::{ConfigKey, ModelInfo, ProviderMetadata, ProviderType};
 use goose::session::{Session, SessionInsights, SessionType, SystemInfo};
@@ -20,9 +20,10 @@ use goose::config::declarative_providers::{
     DeclarativeProviderConfig, EnvVarConfig, LoadedProvider, ProviderEngine,
 };
 use goose::conversation::message::{
-    ActionRequired, ActionRequiredData, FrontendToolRequest, Message, MessageContent,
-    MessageMetadata, RedactedThinkingContent, SystemNotificationContent, SystemNotificationType,
-    ThinkingContent, TokenState, ToolConfirmationRequest, ToolRequest, ToolResponse,
+    ActionRequired, ActionRequiredData, FrontendToolRequest, InferenceMetadata, Message,
+    MessageContent, MessageMetadata, RedactedThinkingContent, SystemNotificationContent,
+    SystemNotificationType, ThinkingContent, TokenState, ToolConfirmationRequest, ToolRequest,
+    ToolResponse,
 };
 
 use crate::routes::recipe_utils::RecipeManifest;
@@ -391,12 +392,10 @@ derive_utoipa!(IconTheme as IconThemeSchema);
         super::routes::config_management::upsert_config,
         super::routes::config_management::remove_config,
         super::routes::config_management::read_config,
-        super::routes::config_management::add_extension,
-        super::routes::config_management::remove_extension,
-        super::routes::config_management::get_extensions,
         super::routes::config_management::read_all_config,
         super::routes::config_management::providers,
         super::routes::config_management::get_provider_models,
+        super::routes::config_management::get_provider_model_info,
         super::routes::config_management::get_slash_commands,
         super::routes::config_management::upsert_permissions,
         super::routes::config_management::create_custom_provider,
@@ -426,8 +425,6 @@ derive_utoipa!(IconTheme as IconThemeSchema);
         super::routes::agent::export_app,
         super::routes::agent::import_app,
         super::routes::agent::update_from_session,
-        super::routes::agent::agent_add_extension,
-        super::routes::agent::agent_remove_extension,
         super::routes::agent::update_agent_provider,
         super::routes::agent::update_session,
         super::routes::action_required::confirm_tool_action,
@@ -443,9 +440,10 @@ derive_utoipa!(IconTheme as IconThemeSchema);
         super::routes::session::delete_session,
         super::routes::session::export_session,
         super::routes::session::import_session,
+        super::routes::session::share_session_nostr,
+        super::routes::session::import_session_nostr,
         super::routes::session::update_session_user_recipe_values,
         super::routes::session::fork_session,
-        super::routes::session::get_session_extensions,
         super::routes::schedule::create_schedule,
         super::routes::schedule::list_schedules,
         super::routes::schedule::delete_schedule,
@@ -487,8 +485,6 @@ derive_utoipa!(IconTheme as IconThemeSchema);
         super::routes::config_management::SlashCommandsResponse,
         super::routes::config_management::SlashCommand,
         super::routes::config_management::CommandType,
-        super::routes::config_management::ExtensionResponse,
-        super::routes::config_management::ExtensionQuery,
         super::routes::config_management::ToolPermission,
         super::routes::config_management::UpsertPermissionsQuery,
         super::routes::config_management::UpdateCustomProviderRequest,
@@ -512,16 +508,19 @@ derive_utoipa!(IconTheme as IconThemeSchema);
         super::routes::session_events::SessionReplyResponse,
         super::routes::session_events::CancelRequest,
         super::routes::session::ImportSessionRequest,
+        super::routes::session::ShareSessionNostrRequest,
+        super::routes::session::ShareSessionNostrResponse,
+        super::routes::session::ImportSessionNostrRequest,
         super::routes::session::SessionListResponse,
         super::routes::session::UpdateSessionNameRequest,
         super::routes::session::UpdateSessionUserRecipeValuesRequest,
         super::routes::session::UpdateSessionUserRecipeValuesResponse,
         super::routes::session::ForkRequest,
         super::routes::session::ForkResponse,
-        super::routes::session::SessionExtensionsResponse,
         Message,
         MessageContent,
         MessageMetadata,
+        InferenceMetadata,
         TokenState,
         ContentSchema,
         EmbeddedResourceSchema,
@@ -568,6 +567,8 @@ derive_utoipa!(IconTheme as IconThemeSchema);
         PrincipalType,
         ModelInfo,
         ModelConfig,
+        ThinkingEffort,
+        super::routes::config_management::ProviderModelInfoQuery,
         Session,
         goose::config::goose_mode::GooseMode,
         SessionInsights,
@@ -634,8 +635,6 @@ derive_utoipa!(IconTheme as IconThemeSchema);
         super::routes::agent::RestartAgentRequest,
         super::routes::agent::UpdateWorkingDirRequest,
         super::routes::agent::UpdateFromSessionRequest,
-        super::routes::agent::AddExtensionRequest,
-        super::routes::agent::RemoveExtensionRequest,
         super::routes::agent::ResumeAgentResponse,
         super::routes::agent::RestartAgentResponse,
         goose::agents::ExtensionLoadResult,
@@ -673,6 +672,7 @@ pub struct ApiDoc;
         super::routes::local_inference::list_local_models,
         super::routes::local_inference::sync_featured_models,
         super::routes::local_inference::search_hf_models,
+        super::routes::local_inference::list_builtin_chat_templates,
         super::routes::local_inference::get_repo_files,
         super::routes::local_inference::download_hf_model,
         super::routes::local_inference::get_local_model_download_progress,
@@ -691,7 +691,9 @@ pub struct ApiDoc;
         goose::providers::local_inference::hf_models::HfQuantVariant,
         super::routes::local_inference::RepoVariantsResponse,
         goose::providers::local_inference::local_model_registry::ModelSettings,
+        goose::providers::local_inference::local_model_registry::ChatTemplate,
         goose::providers::local_inference::local_model_registry::SamplingConfig,
+        goose::providers::local_inference::local_model_registry::ToolCallingMode,
     ))
 )]
 pub struct LocalInferenceApiDoc;

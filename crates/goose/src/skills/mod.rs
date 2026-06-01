@@ -2,17 +2,22 @@
 //! built-ins) and the runtime MCP client (`client` submodule). User-facing
 //! CRUD lives in `crate::sources`, which generalizes across source types.
 
+mod arguments;
 mod builtin;
 pub mod client;
 
 pub use client::{SkillsClient, EXTENSION_NAME};
 
 use crate::config::paths::Paths;
+use crate::plugins::installed_plugin_skill_dirs;
 use crate::sources::parse_frontmatter;
+use agent_client_protocol::Error;
+use anyhow::Result;
+use arguments::apply_skill_arguments;
 use goose_sdk::custom_requests::{SourceEntry, SourceType};
-use sacp::Error;
 use serde::Deserialize;
-use std::collections::HashSet;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
@@ -22,6 +27,12 @@ pub struct SkillFrontmatter {
     pub name: Option<String>,
     #[serde(default)]
     pub description: String,
+    /// Free-form bag for caller-defined fields. Per the agentskills.io spec
+    /// (<https://agentskills.io/specification#frontmatter>), arbitrary
+    /// metadata lives in this nested mapping so it doesn't collide with
+    /// reserved frontmatter fields.
+    #[serde(default)]
+    pub metadata: HashMap<String, Value>,
 }
 
 /// Canonical writable location for global user skills: `~/.agents/skills`.
@@ -88,6 +99,68 @@ pub(crate) fn validate_skill_name(name: &str) -> Result<(), Error> {
     Ok(())
 }
 
+fn loaded_skill_context(skill: &SourceEntry, content: &str) -> String {
+    let title = format!("{} ({})", skill.name, skill.source_type);
+    let mut output = format!(
+        "# Loaded Skill: {title}\n\n{}\n\n## Content\n\n{}\n",
+        skill.description, content
+    );
+
+    if !skill.supporting_files.is_empty() {
+        let skill_dir = Path::new(&skill.path);
+        output.push_str(&format!(
+            "\n## Supporting Files\n\nSkill directory: {}\n\n",
+            skill.path
+        ));
+        for file in &skill.supporting_files {
+            if let Ok(relative) = Path::new(file).strip_prefix(skill_dir) {
+                let rel_str = relative.to_string_lossy().replace('\\', "/");
+                output.push_str(&format!(
+                    "- {} → load_skill(name: \"{}/{}\")\n",
+                    rel_str, skill.name, rel_str
+                ));
+            }
+        }
+    }
+
+    output
+}
+
+pub fn loaded_skill_context_with_args(skill: &SourceEntry, args: Option<&str>) -> Result<String> {
+    let content = if let Some(args) = args {
+        apply_skill_arguments(&skill.content, args, &skill_argument_names(skill))?
+    } else {
+        skill.content.clone()
+    };
+
+    Ok(loaded_skill_context(skill, &content))
+}
+
+pub fn skill_argument_hint(skill: &SourceEntry) -> Option<String> {
+    skill
+        .properties
+        .get("argument-hint")
+        .and_then(|value| value.as_str())
+        .filter(|hint| !hint.is_empty())
+        .map(str::to_string)
+}
+
+pub fn skill_argument_names(skill: &SourceEntry) -> Vec<String> {
+    skill
+        .properties
+        .get("arguments")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn canonicalize_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -104,6 +177,7 @@ fn inferred_discoverable_skill_root(path: &Path) -> Option<PathBuf> {
         global_roots.push(home.join(".claude").join("skills"));
         global_roots.push(home.join(".config").join("agents").join("skills"));
     }
+    global_roots.extend(installed_plugin_skill_dirs());
 
     for root in global_roots {
         let canonical_root = canonicalize_or_original(&root);
@@ -168,9 +242,31 @@ pub(crate) fn infer_skill_name(dir: &Path) -> String {
         .to_string()
 }
 
-pub(crate) fn build_skill_md(name: &str, description: &str, content: &str) -> String {
+pub(crate) fn build_skill_md(
+    name: &str,
+    description: &str,
+    content: &str,
+    metadata: &HashMap<String, Value>,
+) -> String {
     let safe_desc = description.replace('\'', "''");
-    let mut md = format!("---\nname: {}\ndescription: '{}'\n---\n", name, safe_desc);
+    let mut md = String::from("---\n");
+    md.push_str(&format!("name: {}\n", name));
+    md.push_str(&format!("description: '{}'\n", safe_desc));
+    if !metadata.is_empty() {
+        md.push_str("metadata:\n");
+        // Use YAML for the nested metadata block. We render it with serde_yaml
+        // and indent every line by two spaces so it nests under `metadata:`.
+        let yaml = serde_yaml::to_string(metadata).unwrap_or_default();
+        for line in yaml.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            md.push_str("  ");
+            md.push_str(line);
+            md.push('\n');
+        }
+    }
+    md.push_str("---\n");
     if !content.is_empty() {
         md.push('\n');
         md.push_str(content);
@@ -211,6 +307,12 @@ pub fn all_skill_dirs(working_dir: Option<&Path>) -> Vec<(PathBuf, bool)> {
         dirs.push((h.join(".config").join("agents").join("skills"), true));
     }
 
+    dirs.extend(
+        installed_plugin_skill_dirs()
+            .into_iter()
+            .map(|dir| (dir, true)),
+    );
+
     dirs
 }
 
@@ -245,9 +347,11 @@ fn parse_skill_content(content: &str, path: &Path, global: bool) -> Option<Sourc
         name,
         description: metadata.description,
         content: body,
-        directory: path.to_string_lossy().into_owned(),
+        path: path.to_string_lossy().into_owned(),
         global,
+        writable: true,
         supporting_files: Vec::new(),
+        properties: metadata.metadata,
     })
 }
 
@@ -362,8 +466,10 @@ pub fn discover_skills(working_dir: Option<&Path>) -> Vec<SourceEntry> {
         if let Some(source) = parse_skill_content(content, &PathBuf::new(), true) {
             if !seen.contains(&source.name) {
                 seen.insert(source.name.clone());
+                let path = format!("builtin://skills/{}", source.name);
                 sources.push(SourceEntry {
                     source_type: SourceType::BuiltinSkill,
+                    path,
                     ..source
                 });
             }
@@ -383,4 +489,46 @@ pub fn list_installed_skills(working_dir: Option<&Path>) -> Vec<SourceEntry> {
         }
     };
     discover_skills(wd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn skill_with_content(content: &str) -> SourceEntry {
+        SourceEntry {
+            source_type: SourceType::Skill,
+            name: "test-skill".to_string(),
+            description: "Test skill".to_string(),
+            content: content.to_string(),
+            path: String::new(),
+            global: false,
+            writable: true,
+            supporting_files: Vec::new(),
+            properties: HashMap::from([(
+                "arguments".to_string(),
+                json!(["component", "from", "to"]),
+            )]),
+        }
+    }
+
+    #[test]
+    fn loaded_skill_context_with_args_replaces_arguments_placeholder_with_raw_args() {
+        let skill = skill_with_content("Review $ARGUMENTS carefully.");
+
+        let rendered = loaded_skill_context_with_args(&skill, Some("src/foo.rs --strict")).unwrap();
+
+        assert!(rendered.contains("Review src/foo.rs --strict carefully."));
+    }
+
+    #[test]
+    fn loaded_skill_context_with_args_uses_context_without_args() {
+        let skill = skill_with_content("Review the code carefully.");
+
+        let rendered = loaded_skill_context_with_args(&skill, None).unwrap();
+
+        assert!(rendered.contains("# Loaded Skill: test-skill (skill)"));
+        assert!(rendered.contains("## Content\n\nReview the code carefully."));
+    }
 }

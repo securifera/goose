@@ -10,7 +10,7 @@
     "license": {
       "name": "Apache-2.0"
     },
-    "version": "1.33.0"
+    "version": "1.36.0"
   },
   "paths": {
     "/action-required/tool-confirmation": {
@@ -40,45 +40,6 @@
           },
           "401": {
             "description": "Unauthorized - invalid secret key"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/agent/add_extension": {
-      "post": {
-        "tags": [
-          "super::routes::agent"
-        ],
-        "operationId": "agent_add_extension",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AddExtensionRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Extension added",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized - invalid secret key"
-          },
-          "424": {
-            "description": "Agent not initialized"
           },
           "500": {
             "description": "Internal server error"
@@ -116,14 +77,45 @@
           "401": {
             "description": "Unauthorized - invalid secret key"
           },
+          "403": {
+            "description": "Forbidden - tool is not app-visible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
-            "description": "Resource not found"
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           },
           "424": {
-            "description": "Agent not initialized"
+            "description": "Frontend tool execution requires the frontend host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           },
           "500": {
-            "description": "Internal server error"
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -327,45 +319,6 @@
           },
           "404": {
             "description": "Resource not found"
-          },
-          "424": {
-            "description": "Agent not initialized"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/agent/remove_extension": {
-      "post": {
-        "tags": [
-          "super::routes::agent"
-        ],
-        "operationId": "agent_remove_extension",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RemoveExtensionRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Extension removed",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized - invalid secret key"
           },
           "424": {
             "description": "Agent not initialized"
@@ -946,102 +899,6 @@
         }
       }
     },
-    "/config/extensions": {
-      "get": {
-        "tags": [
-          "super::routes::config_management"
-        ],
-        "operationId": "get_extensions",
-        "responses": {
-          "200": {
-            "description": "All extensions retrieved successfully",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ExtensionResponse"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "super::routes::config_management"
-        ],
-        "operationId": "add_extension",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ExtensionQuery"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Extension added or updated successfully",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request"
-          },
-          "422": {
-            "description": "Could not serialize config.yaml"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
-    "/config/extensions/{name}": {
-      "delete": {
-        "tags": [
-          "super::routes::config_management"
-        ],
-        "operationId": "remove_extension",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Extension removed successfully",
-            "content": {
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Extension not found"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        }
-      }
-    },
     "/config/permissions": {
       "post": {
         "tags": [
@@ -1338,6 +1195,56 @@
         }
       }
     },
+    "/config/providers/{name}/model-info": {
+      "post": {
+        "tags": [
+          "super::routes::config_management"
+        ],
+        "operationId": "get_provider_model_info",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Provider name (e.g., openai)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderModelInfoQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Model metadata fetched successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown provider, provider not configured, or authentication error"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
     "/config/providers/{name}/models": {
       "get": {
         "tags": [
@@ -1363,7 +1270,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "string"
+                    "$ref": "#/components/schemas/ModelInfo"
                   }
                 }
               }
@@ -1905,6 +1812,29 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SetupResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/local-inference/chat-templates/builtin": {
+      "get": {
+        "tags": [
+          "super::routes::local_inference"
+        ],
+        "operationId": "list_builtin_chat_templates",
+        "responses": {
+          "200": {
+            "description": "llama.cpp built-in chat template names",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
                 }
               }
             }
@@ -2749,7 +2679,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Scheduled job deleted successfully"
+            "description": "Scheduled job removed successfully"
           },
           "404": {
             "description": "Scheduled job not found"
@@ -3099,6 +3029,50 @@
           },
           "400": {
             "description": "Bad request - Invalid JSON"
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/sessions/import/nostr": {
+      "post": {
+        "tags": [
+          "Session Management"
+        ],
+        "operationId": "import_session_nostr",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportSessionNostrRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Nostr shared session imported successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request - Invalid Nostr share link"
           },
           "401": {
             "description": "Unauthorized - Invalid or missing API key"
@@ -3471,51 +3445,6 @@
         ]
       }
     },
-    "/sessions/{session_id}/extensions": {
-      "get": {
-        "tags": [
-          "Session Management"
-        ],
-        "operationId": "get_session_extensions",
-        "parameters": [
-          {
-            "name": "session_id",
-            "in": "path",
-            "description": "Unique identifier for the session",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Session extensions retrieved successfully",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SessionExtensionsResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized - Invalid or missing API key"
-          },
-          "404": {
-            "description": "Session not found"
-          },
-          "500": {
-            "description": "Internal server error"
-          }
-        },
-        "security": [
-          {
-            "api_key": []
-          }
-        ]
-      }
-    },
     "/sessions/{session_id}/fork": {
       "post": {
         "tags": [
@@ -3607,6 +3536,61 @@
           },
           "400": {
             "description": "Bad request - Name too long (max 200 characters)"
+          },
+          "401": {
+            "description": "Unauthorized - Invalid or missing API key"
+          },
+          "404": {
+            "description": "Session not found"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/sessions/{session_id}/share/nostr": {
+      "post": {
+        "tags": [
+          "Session Management"
+        ],
+        "operationId": "share_session_nostr",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Unique identifier for the session",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ShareSessionNostrRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Session shared to Nostr successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShareSessionNostrResponse"
+                }
+              }
+            }
           },
           "401": {
             "description": "Unauthorized - Invalid or missing API key"
@@ -3938,21 +3922,6 @@
           "propertyName": "actionType"
         }
       },
-      "AddExtensionRequest": {
-        "type": "object",
-        "required": [
-          "session_id",
-          "config"
-        ],
-        "properties": {
-          "config": {
-            "$ref": "#/components/schemas/ExtensionConfig"
-          },
-          "session_id": {
-            "type": "string"
-          }
-        }
-      },
       "Annotations": {
         "type": "object",
         "properties": {
@@ -4078,6 +4047,63 @@
           "user_message": {
             "$ref": "#/components/schemas/Message"
           }
+        }
+      },
+      "ChatTemplate": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "embedded"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "type"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "builtin"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "template",
+              "type"
+            ],
+            "properties": {
+              "template": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "custom_inline"
+                ]
+              }
+            }
+          }
+        ],
+        "discriminator": {
+          "propertyName": "type"
         }
       },
       "CheckProviderRequest": {
@@ -4551,6 +4577,7 @@
           },
           "dynamic_models": {
             "type": "boolean",
+            "description": "Controls whether `fetch_supported_models` calls the provider's `/v1/models`\nendpoint or returns the static `models` list directly.\n\n- `Some(false)` + non-empty `models`: return the static list; no API call.\nConstruction fails if `models` is empty.\n- `Some(true)` or `None`: try the API; fall back to `models` on 404.",
             "nullable": true
           },
           "engine": {
@@ -4586,6 +4613,9 @@
           },
           "name": {
             "type": "string"
+          },
+          "preserves_thinking": {
+            "type": "boolean"
           },
           "requires_auth": {
             "type": "boolean"
@@ -5241,45 +5271,6 @@
           }
         }
       },
-      "ExtensionQuery": {
-        "type": "object",
-        "required": [
-          "name",
-          "config",
-          "enabled"
-        ],
-        "properties": {
-          "config": {
-            "$ref": "#/components/schemas/ExtensionConfig"
-          },
-          "enabled": {
-            "type": "boolean"
-          },
-          "name": {
-            "type": "string"
-          }
-        }
-      },
-      "ExtensionResponse": {
-        "type": "object",
-        "required": [
-          "extensions"
-        ],
-        "properties": {
-          "extensions": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ExtensionEntry"
-            }
-          },
-          "warnings": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        }
-      },
       "FeaturesResponse": {
         "type": "object",
         "required": [
@@ -5593,6 +5584,17 @@
           }
         }
       },
+      "ImportSessionNostrRequest": {
+        "type": "object",
+        "required": [
+          "deeplink"
+        ],
+        "properties": {
+          "deeplink": {
+            "type": "string"
+          }
+        }
+      },
       "ImportSessionRequest": {
         "type": "object",
         "required": [
@@ -5601,6 +5603,25 @@
         "properties": {
           "json": {
             "type": "string"
+          }
+        }
+      },
+      "InferenceMetadata": {
+        "type": "object",
+        "required": [
+          "provider",
+          "requestedModel"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "requestedModel": {
+            "type": "string"
+          },
+          "resolvedModel": {
+            "type": "string",
+            "nullable": true
           }
         }
       },
@@ -6199,7 +6220,7 @@
       },
       "MessageMetadata": {
         "type": "object",
-        "description": "Metadata for message visibility",
+        "description": "Metadata for message visibility and model inference details",
         "required": [
           "userVisible",
           "agentVisible"
@@ -6208,6 +6229,14 @@
           "agentVisible": {
             "type": "boolean",
             "description": "Whether the message should be included in the agent's context window"
+          },
+          "inference": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InferenceMetadata"
+              }
+            ],
+            "nullable": true
           },
           "userVisible": {
             "type": "boolean",
@@ -6388,6 +6417,15 @@
             "description": "Cost per token for output in USD (optional)",
             "nullable": true
           },
+          "reasoning": {
+            "type": "boolean",
+            "description": "Whether this model supports reasoning/thinking controls"
+          },
+          "resolved_model": {
+            "type": "string",
+            "description": "The underlying model resolved from provider metadata, when the configured model is an alias or endpoint.",
+            "nullable": true
+          },
           "supports_cache_control": {
             "type": "boolean",
             "description": "Whether this model supports cache control",
@@ -6401,6 +6439,7 @@
           "provider",
           "model",
           "context_limit",
+          "reasoning",
           "currency"
         ],
         "properties": {
@@ -6441,6 +6480,9 @@
           },
           "provider": {
             "type": "string"
+          },
+          "reasoning": {
+            "type": "boolean"
           }
         }
       },
@@ -6481,6 +6523,9 @@
       "ModelSettings": {
         "type": "object",
         "properties": {
+          "chat_template": {
+            "$ref": "#/components/schemas/ChatTemplate"
+          },
           "context_size": {
             "type": "integer",
             "format": "int32",
@@ -6531,9 +6576,6 @@
             "format": "int32",
             "nullable": true
           },
-          "native_tool_calling": {
-            "type": "boolean"
-          },
           "presence_penalty": {
             "type": "number",
             "format": "float"
@@ -6549,15 +6591,15 @@
           "sampling": {
             "$ref": "#/components/schemas/SamplingConfig"
           },
-          "use_jinja": {
-            "type": "boolean"
+          "tool_calling": {
+            "$ref": "#/components/schemas/ToolCallingMode"
           },
           "use_mlock": {
             "type": "boolean"
           },
           "vision_capable": {
             "type": "boolean",
-            "description": "Whether this model architecture supports vision input.\nDerived from the featured model table, not user-configurable."
+            "description": "Whether this model architecture supports vision input.\nDerived from associated mmproj metadata, not user-configurable."
           }
         }
       },
@@ -6752,6 +6794,10 @@
           },
           "provider_type": {
             "$ref": "#/components/schemas/ProviderType"
+          },
+          "saved_model": {
+            "type": "string",
+            "nullable": true
           }
         }
       },
@@ -6821,6 +6867,17 @@
               "type": "string"
             },
             "description": "step-by-step instructions for set up providers eg: api key"
+          }
+        }
+      },
+      "ProviderModelInfoQuery": {
+        "type": "object",
+        "required": [
+          "model"
+        ],
+        "properties": {
+          "model": {
+            "type": "string"
           }
         }
       },
@@ -7233,21 +7290,6 @@
         ],
         "properties": {
           "data": {
-            "type": "string"
-          }
-        }
-      },
-      "RemoveExtensionRequest": {
-        "type": "object",
-        "required": [
-          "name",
-          "session_id"
-        ],
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "session_id": {
             "type": "string"
           }
         }
@@ -7680,12 +7722,33 @@
             "format": "date-time",
             "nullable": true
           },
+          "parameters": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "allOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ]
+              }
+            }
+          },
           "paused": {
             "type": "boolean"
           },
           "process_start_time": {
             "type": "string",
             "format": "date-time",
+            "nullable": true
+          },
+          "recipe_base_dir": {
+            "type": "string",
+            "description": "Original directory of the recipe file before it was copied to scheduled_recipes/.\nPreserved so that relative paths (sub-recipes, template includes) resolve correctly\nagainst the source tree rather than the scheduler's internal storage directory.",
             "nullable": true
           },
           "source": {
@@ -7705,6 +7768,11 @@
           "message_count"
         ],
         "properties": {
+          "accumulated_cost": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
           "accumulated_input_tokens": {
             "type": "integer",
             "format": "int32",
@@ -7718,6 +7786,11 @@
           "accumulated_total_tokens": {
             "type": "integer",
             "format": "int32",
+            "nullable": true
+          },
+          "archived_at": {
+            "type": "string",
+            "format": "date-time",
             "nullable": true
           },
           "conversation": {
@@ -7766,6 +7839,10 @@
             "format": "int32",
             "nullable": true
           },
+          "project_id": {
+            "type": "string",
+            "nullable": true
+          },
           "provider_name": {
             "type": "string",
             "nullable": true
@@ -7784,10 +7861,6 @@
           },
           "session_type": {
             "$ref": "#/components/schemas/SessionType"
-          },
-          "thread_id": {
-            "type": "string",
-            "nullable": true
           },
           "total_tokens": {
             "type": "integer",
@@ -7872,20 +7945,6 @@
           },
           "workingDir": {
             "type": "string"
-          }
-        }
-      },
-      "SessionExtensionsResponse": {
-        "type": "object",
-        "required": [
-          "extensions"
-        ],
-        "properties": {
-          "extensions": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ExtensionConfig"
-            }
           }
         }
       },
@@ -8044,6 +8103,43 @@
           },
           "success": {
             "type": "boolean"
+          }
+        }
+      },
+      "ShareSessionNostrRequest": {
+        "type": "object",
+        "properties": {
+          "relays": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ShareSessionNostrResponse": {
+        "type": "object",
+        "required": [
+          "deeplink",
+          "nevent",
+          "eventId",
+          "relays"
+        ],
+        "properties": {
+          "deeplink": {
+            "type": "string"
+          },
+          "eventId": {
+            "type": "string"
+          },
+          "nevent": {
+            "type": "string"
+          },
+          "relays": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -8351,6 +8447,16 @@
           }
         }
       },
+      "ThinkingEffort": {
+        "type": "string",
+        "enum": [
+          "off",
+          "low",
+          "medium",
+          "high",
+          "max"
+        ]
+      },
       "TokenState": {
         "type": "object",
         "required": [
@@ -8362,6 +8468,11 @@
           "accumulatedTotalTokens"
         ],
         "properties": {
+          "accumulatedCost": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
           "accumulatedInputTokens": {
             "type": "integer",
             "format": "int32"
@@ -8463,6 +8574,14 @@
             "type": "string"
           }
         }
+      },
+      "ToolCallingMode": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "force_native",
+          "force_emulated"
+        ]
       },
       "ToolConfirmationRequest": {
         "type": "object",
@@ -8725,6 +8844,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "preserves_thinking": {
+            "type": "boolean",
+            "nullable": true
           },
           "requires_auth": {
             "type": "boolean"

@@ -1,4 +1,5 @@
 use super::discover_skills;
+use super::loaded_skill_context_with_args;
 use crate::agents::extension::PlatformExtensionContext;
 use crate::agents::mcp_client::{Error, McpClientTrait};
 use crate::agents::ToolCallContext;
@@ -27,30 +28,8 @@ impl SkillsClient {
             .map(|s| s.working_dir.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-        let mut instructions = String::new();
-        if context.session.is_some() {
-            let sources = discover_skills(Some(&working_dir));
-            let mut skills: Vec<&SourceEntry> = sources
-                .iter()
-                .filter(|s| {
-                    s.source_type == SourceType::Skill || s.source_type == SourceType::BuiltinSkill
-                })
-                .collect();
-            skills.sort_by(|a, b| (&a.name, &a.directory).cmp(&(&b.name, &b.directory)));
-
-            if !skills.is_empty() {
-                instructions.push_str(
-                    "\n\nYou have these skills at your disposal, when it is clear they can help you solve a problem or you are asked to use them:",
-                );
-                for skill in &skills {
-                    instructions.push_str(&format!("\n• {} - {}", skill.name, skill.description));
-                }
-            }
-        }
-
         let info = InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(EXTENSION_NAME, "1.0.0").with_title("Skills"))
-            .with_instructions(instructions);
+            .with_server_info(Implementation::new(EXTENSION_NAME, "1.0.0").with_title("Skills"));
 
         Ok(Self { info, working_dir })
     }
@@ -71,6 +50,10 @@ impl McpClientTrait for SkillsClient {
                 "name": {
                     "type": "string",
                     "description": "Name of the skill to load. Use \"skill-name/path\" to load a supporting file."
+                },
+                "args": {
+                    "type": "string",
+                    "description": "Optional arguments to provide when loading the skill."
                 }
             }
         });
@@ -82,6 +65,7 @@ impl McpClientTrait for SkillsClient {
              load it first to get the detailed instructions.\n\n\
              Examples:\n\
              - load_skill(name: \"gdrive\") → Loads the gdrive skill instructions\n\
+             - load_skill(name: \"my-skill\", args: \"the arguments for the skill\") → Loads a skill with arguments\n\
              - load_skill(name: \"my-skill/template.md\") → Loads a supporting file"
                 .to_string(),
             schema.as_object().unwrap().clone(),
@@ -119,36 +103,21 @@ impl McpClientTrait for SkillsClient {
                 "Missing required parameter: name",
             )]));
         }
+        let args = arguments
+            .as_ref()
+            .and_then(|args| args.get("args"))
+            .and_then(|v| v.as_str());
 
         let skills = discover_skills(Some(&self.working_dir));
 
         if let Some(skill) = skills.iter().find(|s| s.name == skill_name) {
-            let mut output = format!(
-                "# Loaded Skill: {} ({})\n\n{}\n",
-                skill.name,
-                skill.source_type,
-                skill.to_load_text()
-            );
-
-            if !skill.supporting_files.is_empty() {
-                let skill_dir = Path::new(&skill.directory);
-                output.push_str(&format!(
-                    "\n## Supporting Files\n\nSkill directory: {}\n\n",
-                    skill.directory
-                ));
-                for file in &skill.supporting_files {
-                    if let Ok(relative) = Path::new(file).strip_prefix(skill_dir) {
-                        let rel_str = relative.to_string_lossy().replace('\\', "/");
-                        output.push_str(&format!(
-                            "- {} → load_skill(name: \"{}/{}\")\n",
-                            rel_str, skill.name, rel_str
-                        ));
-                    }
-                }
-            }
-
-            output.push_str("\n---\nThis knowledge is now available in your context.");
-            return Ok(CallToolResult::success(vec![Content::text(output)]));
+            return match loaded_skill_context_with_args(skill, args) {
+                Ok(rendered) => Ok(CallToolResult::success(vec![Content::text(rendered)])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to parse skill arguments: {}",
+                    e
+                ))])),
+            };
         }
 
         if let Some((parent_skill_name, raw_relative_path)) = skill_name.split_once('/') {
@@ -157,7 +126,7 @@ impl McpClientTrait for SkillsClient {
                 s.name == parent_skill_name
                     && matches!(s.source_type, SourceType::Skill | SourceType::BuiltinSkill)
             }) {
-                let skill_dir = PathBuf::from(&skill.directory);
+                let skill_dir = PathBuf::from(&skill.path);
                 let canonical_skill_dir = skill_dir
                     .canonicalize()
                     .unwrap_or_else(|_| skill_dir.clone());
@@ -252,6 +221,29 @@ impl McpClientTrait for SkillsClient {
         Some(&self.info)
     }
 
+    fn get_instructions(&self) -> Option<String> {
+        let sources = discover_skills(Some(&self.working_dir));
+        let mut skills: Vec<&SourceEntry> = sources
+            .iter()
+            .filter(|s| {
+                s.source_type == SourceType::Skill || s.source_type == SourceType::BuiltinSkill
+            })
+            .collect();
+        skills.sort_by(|a, b| (&a.name, &a.path).cmp(&(&b.name, &b.path)));
+
+        if skills.is_empty() {
+            return None;
+        }
+
+        let mut instructions = String::from(
+            "\n\nYou have these skills at your disposal, when it is clear they can help you solve a problem or you are asked to use them:",
+        );
+        for skill in &skills {
+            instructions.push_str(&format!("\n• {} - {}", skill.name, skill.description));
+        }
+        Some(instructions)
+    }
+
     async fn subscribe(&self) -> mpsc::Receiver<ServerNotification> {
         let (_tx, rx) = mpsc::channel(1);
         rx
@@ -284,6 +276,7 @@ mod tests {
             extension_manager: None,
             session_manager: Arc::new(crate::session::SessionManager::instance()),
             session: Some(session),
+            use_login_shell_path: false,
         })
         .unwrap();
 
@@ -310,6 +303,7 @@ mod tests {
             extension_manager: None,
             session_manager: Arc::new(crate::session::SessionManager::instance()),
             session: None,
+            use_login_shell_path: false,
         })
         .unwrap();
 
