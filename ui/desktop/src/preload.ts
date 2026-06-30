@@ -1,6 +1,6 @@
 import Electron, { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { Recipe } from './recipe';
-import { GooseApp } from './api';
+import type { GooseApp } from './types/apps';
 import type { Settings, SettingKey } from './utils/settings';
 import { defaultSettings } from './utils/settings';
 
@@ -10,7 +10,6 @@ const localStorageKeyMap: Partial<Record<SettingKey, string>> = {
   useSystemTheme: 'use_system_theme',
   responseStyle: 'response_style',
   showPricing: 'show_pricing',
-  sessionSharing: 'session_sharing_config',
   seenAnnouncementIds: 'seenAnnouncementIds',
 };
 
@@ -29,8 +28,6 @@ function parseLocalStorageValue<K extends SettingKey>(
         return rawValue as Settings[K];
       case 'showPricing':
         return (rawValue === 'true') as unknown as Settings[K];
-      case 'sessionSharing':
-        return JSON.parse(rawValue) as Settings[K];
       case 'seenAnnouncementIds':
         return JSON.parse(rawValue) as Settings[K];
       default:
@@ -114,18 +111,12 @@ type ElectronAPI = {
   openInChrome: (url: string) => void;
   reloadApp: () => void;
   checkForOllama: () => Promise<boolean>;
-  checkMesh: () => Promise<{
-    running: boolean;
-    installed: boolean;
-    models: string[];
-    token?: string;
-    peerCount?: number;
-    nodeStatus?: string;
-    binaryPath?: string;
-  }>;
-  startMesh: (args: string[]) => Promise<{ started: boolean; error?: string; pid?: number }>;
-  stopMesh: () => Promise<{ stopped: boolean }>;
   selectFileOrDirectory: (defaultPath?: string) => Promise<string | null>;
+  selectImportSessionFile: () => Promise<{
+    filePath: string;
+    contents: string;
+    error?: string;
+  } | null>;
   getBinaryPath: (binaryName: string) => Promise<string>;
   readFile: (directory: string) => Promise<FileResponse>;
   writeFile: (directory: string, content: string) => Promise<boolean>;
@@ -176,6 +167,7 @@ type ElectronAPI = {
   onUpdaterEvent: (callback: (event: UpdaterEvent) => void) => void;
   getUpdateState: () => Promise<{ updateAvailable: boolean; latestVersion?: string } | null>;
   isUsingGitHubFallback: () => Promise<boolean>;
+  getAutoDownloadDisabled: () => Promise<boolean>;
   // Recipe warning functions
   closeWindow: () => void;
   hasAcceptedRecipeBefore: (recipe: Recipe) => Promise<boolean>;
@@ -217,12 +209,10 @@ const electronAPI: ElectronAPI = {
   openInChrome: (url: string) => ipcRenderer.send('open-in-chrome', url),
   reloadApp: () => ipcRenderer.send('reload-app'),
   checkForOllama: () => ipcRenderer.invoke('check-ollama'),
-  checkMesh: () => ipcRenderer.invoke('check-mesh'),
-  startMesh: (args: string[]) => ipcRenderer.invoke('start-mesh', args),
-  stopMesh: () => ipcRenderer.invoke('stop-mesh'),
 
   selectFileOrDirectory: (defaultPath?: string) =>
     ipcRenderer.invoke('select-file-or-directory', defaultPath),
+  selectImportSessionFile: () => ipcRenderer.invoke('select-import-session-file'),
   getBinaryPath: (binaryName: string) => ipcRenderer.invoke('get-binary-path', binaryName),
   readFile: (filePath: string) => ipcRenderer.invoke('read-file', filePath),
   writeFile: (filePath: string, content: string) =>
@@ -332,6 +322,9 @@ const electronAPI: ElectronAPI = {
   isUsingGitHubFallback: (): Promise<boolean> => {
     return ipcRenderer.invoke('is-using-github-fallback');
   },
+  getAutoDownloadDisabled: (): Promise<boolean> => {
+    return ipcRenderer.invoke('get-auto-download-disabled');
+  },
   closeWindow: () => ipcRenderer.send('close-window'),
   hasAcceptedRecipeBefore: (recipe: Recipe) =>
     ipcRenderer.invoke('has-accepted-recipe-before', recipe),
@@ -346,9 +339,17 @@ const electronAPI: ElectronAPI = {
   listGitWorktreeDirs: (dir: string) => ipcRenderer.invoke('list-git-worktree-dirs', dir),
 };
 
+function getAppLocale(): unknown {
+  try {
+    return ipcRenderer.sendSync('get-app-locale') ?? config.GOOSE_LOCALE;
+  } catch {
+    return config.GOOSE_LOCALE;
+  }
+}
+
 const appConfigAPI: AppConfigAPI = {
-  get: (key: string) => config[key],
-  getAll: () => config,
+  get: (key: string) => (key === 'GOOSE_LOCALE' ? getAppLocale() : config[key]),
+  getAll: () => ({ ...config, GOOSE_LOCALE: getAppLocale() }),
 };
 
 // Expose the APIs

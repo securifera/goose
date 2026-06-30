@@ -13,9 +13,7 @@ use tokio::task::JoinHandle;
 
 use crate::configuration::Settings;
 use crate::session_event_bus::SessionEventBus;
-use crate::tunnel::TunnelManager;
 use goose::agents::ExtensionLoadResult;
-use goose::gateway::manager::GatewayManager;
 #[cfg(feature = "local-inference")]
 use goose::providers::local_inference::InferenceRuntime;
 
@@ -27,30 +25,22 @@ pub struct AppState {
     pub(crate) agent_manager: Arc<AgentManager>,
     pub recipe_file_hash_map: Arc<Mutex<HashMap<String, PathBuf>>>,
     recipe_session_tracker: Arc<Mutex<HashSet<String>>>,
-    pub tunnel_manager: Arc<TunnelManager>,
-    pub gateway_manager: Arc<GatewayManager>,
     pub extension_loading_tasks: ExtensionLoadingTasks,
     #[cfg(feature = "local-inference")]
     inference_runtime: Arc<OnceLock<Arc<InferenceRuntime>>>,
     pub settings: Arc<Settings>,
     session_buses: Arc<Mutex<HashMap<String, Arc<SessionEventBus>>>>,
-
 }
 
 impl AppState {
-    pub async fn new(tls: bool, settings: Settings) -> anyhow::Result<Arc<AppState>> {
+    pub async fn new(_tls: bool, settings: Settings) -> anyhow::Result<Arc<AppState>> {
         register_builtin_extensions(goose_mcp::BUILTIN_EXTENSIONS.clone());
 
         let agent_manager = AgentManager::instance().await?;
-        let tunnel_manager = Arc::new(TunnelManager::new(tls));
-        let gateway_manager = Arc::new(GatewayManager::new(agent_manager.clone())?);
-
         Ok(Arc::new(Self {
             agent_manager,
             recipe_file_hash_map: Arc::new(Mutex::new(HashMap::new())),
             recipe_session_tracker: Arc::new(Mutex::new(HashSet::new())),
-            tunnel_manager,
-            gateway_manager,
             extension_loading_tasks: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(feature = "local-inference")]
             inference_runtime: Arc::new(OnceLock::new()),
@@ -88,27 +78,39 @@ impl AppState {
         tasks.insert(session_id, Arc::new(Mutex::new(Some(task))));
     }
 
+    pub async fn has_extension_loading_task(&self, session_id: &str) -> bool {
+        let tasks = self.extension_loading_tasks.lock().await;
+        tasks.contains_key(session_id)
+    }
+
     pub async fn take_extension_loading_task(
         &self,
         session_id: &str,
-    ) -> Option<Vec<ExtensionLoadResult>> {
+    ) -> Result<Option<Vec<ExtensionLoadResult>>, tokio::task::JoinError> {
         let task_holder = {
             let tasks = self.extension_loading_tasks.lock().await;
             tasks.get(session_id).cloned()
         };
 
         if let Some(holder) = task_holder {
-            let task = holder.lock().await.take();
-            if let Some(handle) = task {
+            let mut task = holder.lock().await;
+            if let Some(handle) = task.as_mut() {
+                // Keep the per-session task locked and discoverable while awaiting so
+                // concurrent routes cannot mutate extensions before background loading finishes.
                 match handle.await {
-                    Ok(results) => return Some(results),
+                    Ok(results) => {
+                        task.take();
+                        return Ok(Some(results));
+                    }
                     Err(e) => {
+                        task.take();
                         tracing::warn!("Background extension loading task failed: {}", e);
+                        return Err(e);
                     }
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     pub async fn remove_extension_loading_task(&self, session_id: &str) {
@@ -151,12 +153,6 @@ impl AppState {
     pub async fn get_event_bus(&self, session_id: &str) -> Option<Arc<SessionEventBus>> {
         let buses = self.session_buses.lock().await;
         buses.get(session_id).cloned()
-    }
-
-    /// Remove the event bus for a session, freeing its replay buffer.
-    pub async fn remove_event_bus(&self, session_id: &str) {
-        let mut buses = self.session_buses.lock().await;
-        buses.remove(session_id);
     }
 
     pub async fn get_agent(&self, session_id: String) -> anyhow::Result<Arc<goose::agents::Agent>> {

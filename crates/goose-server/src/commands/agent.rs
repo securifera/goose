@@ -37,8 +37,8 @@ async fn shutdown_signal() {
 }
 
 pub async fn run() -> Result<()> {
-    // Install the rustls crypto provider early, before any spawned tasks (tunnel,
-    // gateways, etc.) try to open TLS connections. Both `ring` and `aws-lc-rs`
+    // Install the rustls crypto provider early, before any spawned tasks (tunnel, etc.)
+    // try to open TLS connections. Both `ring` and `aws-lc-rs`
     // features are enabled on rustls (via different transitive deps), so rustls
     // cannot auto-detect a provider — we must pick one explicitly.
     #[cfg(feature = "rustls-tls")]
@@ -46,8 +46,6 @@ pub async fn run() -> Result<()> {
 
     boot_marker("main entered");
     crate::logging::setup_logging(Some("goosed"))?;
-
-    goose::security::set_security_defaults();
 
     let settings = configuration::Settings::new()?;
     let tls = settings.tls;
@@ -57,13 +55,6 @@ pub async fn run() -> Result<()> {
 
     boot_marker("appstate init start");
     let app_state = state::AppState::new(tls, settings.clone()).await?;
-
-    // Share the server secret with the tunnel manager so it uses the same
-    // key for forwarded requests, without mutating the process environment.
-    app_state
-        .tunnel_manager
-        .set_server_secret(secret_key.clone())
-        .await;
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -81,6 +72,7 @@ pub async fn run() -> Result<()> {
         config_dir: Paths::config_dir(),
         goose_platform: GoosePlatform::GooseDesktop,
         additional_source_roots: Vec::new(),
+        scheduler: Some(app_state.scheduler()),
     }));
 
     let rest_router = crate::routes::configure(app_state.clone(), secret_key.clone()).layer(
@@ -94,16 +86,6 @@ pub async fn run() -> Result<()> {
     let app = rest_router.merge(acp_router).layer(cors);
 
     let addr = app_state.settings.socket_addr();
-
-    let tunnel_manager = app_state.tunnel_manager.clone();
-    tokio::spawn(async move {
-        tunnel_manager.check_auto_start().await;
-    });
-
-    let gateway_manager = app_state.gateway_manager.clone();
-    tokio::spawn(async move {
-        gateway_manager.check_auto_start().await;
-    });
 
     if tls {
         #[cfg(any(feature = "rustls-tls", feature = "native-tls"))]

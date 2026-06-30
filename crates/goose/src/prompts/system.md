@@ -1,4 +1,9 @@
 You are a general-purpose AI agent.
+
+{% if moim_system_prompt_block is defined %}
+{{ moim_system_prompt_block }}
+{% endif %}
+
 {% if not code_execution_mode %}
 
 # Extensions

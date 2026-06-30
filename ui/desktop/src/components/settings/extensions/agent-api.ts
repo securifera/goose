@@ -1,6 +1,6 @@
 import { toastService } from '../../../toasts';
-import { ExtensionConfig } from '../../../api';
-import { addSessionExtension, removeSessionExtension } from '../../../acp/extensions';
+import type { ExtensionConfig } from '../../../types/extensions';
+import { addSessionExtension, removeSessionExtension } from '../../../acp/session-extensions';
 import { errorMessage } from '../../../utils/conversionUtils';
 import {
   createExtensionRecoverHints,
@@ -60,6 +60,7 @@ export async function removeFromAgent(
 
   try {
     await removeSessionExtension(sessionId, extensionName);
+
     if (showToast) {
       toastService.dismiss(toastId);
       toastService.success({

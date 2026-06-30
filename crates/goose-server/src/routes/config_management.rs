@@ -9,9 +9,9 @@ use axum::{
 };
 use goose::config::declarative_providers::LoadedProvider;
 use goose::config::paths::Paths;
+use goose::config::ExtensionEntry;
 use goose::config::{Config, ConfigError};
 use goose::custom_requests::SourceType;
-use goose::model::ModelConfig;
 use goose::providers::base::{ModelInfo, ProviderMetadata, ProviderType};
 use goose::providers::canonical::maybe_get_canonical_model;
 use goose::providers::catalog::{
@@ -21,14 +21,28 @@ use goose::providers::catalog::{
 use goose::providers::create_with_default_model;
 use goose::providers::providers as get_providers;
 use goose::{
-    agents::execute_commands, config::permission::PermissionLevel,
-    slash_commands::recipe_slash_command,
+    agents::execute_commands, agents::ExtensionConfig, slash_commands::recipe_slash_command,
 };
+use goose_providers::model::ModelConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_yaml;
 use std::{collections::HashMap, sync::Arc};
 use utoipa::ToSchema;
+
+#[derive(Serialize, ToSchema)]
+pub struct ExtensionResponse {
+    pub extensions: Vec<ExtensionEntry>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ExtensionQuery {
+    pub name: String,
+    pub config: ExtensionConfig,
+    pub enabled: bool,
+}
 
 #[derive(Deserialize, ToSchema)]
 pub struct UpsertConfigQuery {
@@ -61,17 +75,6 @@ pub struct ProviderDetails {
 #[derive(Serialize, ToSchema)]
 pub struct ProvidersResponse {
     pub providers: Vec<ProviderDetails>,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ToolPermission {
-    pub tool_name: String,
-    pub permission: PermissionLevel,
-}
-
-#[derive(Deserialize, ToSchema)]
-pub struct UpsertPermissionsQuery {
-    pub tool_permissions: Vec<ToolPermission>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -126,6 +129,15 @@ pub enum ConfigValueResponse {
     MaskedValue(MaskedSecret),
 }
 
+pub use goose::providers::provider_secrets::{
+    ProviderSecret, ProviderSecretStatus, ProviderSecretStorage,
+};
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProviderSecretsResponse {
+    pub secrets: Vec<ProviderSecret>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub enum CommandType {
     Builtin,
@@ -159,11 +171,8 @@ pub async fn upsert_config(
 ) -> Result<Json<Value>, ErrorResponse> {
     let config = Config::global();
 
-    // Intercept legacy keys to write structured provider config
     if query.key == "GOOSE_PROVIDER" {
         if let Some(name) = query.value.as_str() {
-            // Preserve the target provider's saved model rather than copying
-            // the current active provider's model into the new entry.
             let model = goose::config::get_provider_entry(config, name)
                 .map(|e| e.model)
                 .or_else(|| config.get_goose_model().ok())
@@ -233,11 +242,43 @@ fn mask_secret(secret: Value) -> String {
     format!("{}{}", visible, mask)
 }
 
-fn is_valid_provider_name(provider_name: &str) -> bool {
-    !provider_name.is_empty()
-        && provider_name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+#[utoipa::path(
+    get,
+    path = "/config/provider-secrets",
+    responses(
+        (status = 200, description = "Provider secrets retrieved successfully", body = ProviderSecretsResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn list_provider_secrets() -> Result<Json<ProviderSecretsResponse>, ErrorResponse> {
+    let secrets = goose::providers::provider_secrets::list_provider_secrets().await?;
+    Ok(Json(ProviderSecretsResponse { secrets }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/config/provider-secrets/{id}",
+    params(
+        ("id" = String, Path, description = "Provider secret identifier")
+    ),
+    responses(
+        (status = 200, description = "Provider secret deleted successfully", body = String),
+        (status = 400, description = "Invalid provider secret identifier"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn delete_provider_secret(Path(id): Path<String>) -> Result<Json<String>, ErrorResponse> {
+    use goose::providers::provider_secrets::DeleteProviderSecretError;
+
+    match goose::providers::provider_secrets::delete_provider_secret(&id).await {
+        Ok(()) => Ok(Json(format!("Deleted provider secret {}", id))),
+        Err(DeleteProviderSecretError::InvalidId(id)) => Err(ErrorResponse::bad_request(format!(
+            "Invalid provider secret id: '{}'",
+            id
+        ))),
+        Err(DeleteProviderSecretError::Config(e)) => Err(e.into()),
+        Err(DeleteProviderSecretError::Other(e)) => Err(ErrorResponse::internal(e.to_string())),
+    }
 }
 
 #[utoipa::path(
@@ -254,7 +295,6 @@ pub async fn read_config(
 ) -> Result<Json<ConfigValueResponse>, ErrorResponse> {
     let config = Config::global();
 
-    // Intercept legacy keys to return structured provider config
     if query.key == "GOOSE_PROVIDER" || query.key == "active_provider" {
         if let Ok(val) = config.get_goose_provider() {
             return Ok(Json(ConfigValueResponse::Value(Value::String(val))));
@@ -282,6 +322,72 @@ pub async fn read_config(
         Err(e) => return Err(e.into()),
     };
     Ok(Json(response_value))
+}
+
+#[utoipa::path(
+    get,
+    path = "/config/extensions",
+    responses(
+        (status = 200, description = "All extensions retrieved successfully", body = ExtensionResponse),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn get_extensions() -> Result<Json<ExtensionResponse>, ErrorResponse> {
+    let extensions = goose::config::get_all_extensions()
+        .into_iter()
+        .filter(|ext| !goose::agents::extension_manager::is_hidden_extension(&ext.config.name()))
+        .collect();
+    let warnings = goose::config::get_warnings();
+    Ok(Json(ExtensionResponse {
+        extensions,
+        warnings,
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/config/extensions",
+    request_body = ExtensionQuery,
+    responses(
+        (status = 200, description = "Extension added or updated successfully", body = String),
+        (status = 400, description = "Invalid request"),
+        (status = 422, description = "Could not serialize config.yaml"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn add_extension(
+    Json(extension_query): Json<ExtensionQuery>,
+) -> Result<Json<String>, ErrorResponse> {
+    let extensions = goose::config::get_all_extensions();
+    let key = goose::config::extensions::name_to_key(&extension_query.name);
+
+    let is_update = extensions.iter().any(|e| e.config.key() == key);
+
+    goose::config::set_extension(ExtensionEntry {
+        enabled: extension_query.enabled,
+        config: extension_query.config,
+    });
+
+    if is_update {
+        Ok(Json(format!("Updated extension {}", extension_query.name)))
+    } else {
+        Ok(Json(format!("Added extension {}", extension_query.name)))
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/config/extensions/{name}",
+    responses(
+        (status = 200, description = "Extension removed successfully", body = String),
+        (status = 404, description = "Extension not found"),
+        (status = 500, description = "Internal server error")
+    )
+)]
+pub async fn remove_extension(Path(name): Path<String>) -> Result<Json<String>, ErrorResponse> {
+    let key = goose::config::extensions::name_to_key(&name);
+    goose::config::remove_extension(&key);
+    Ok(Json(format!("Removed extension {}", name)))
 }
 
 #[utoipa::path(
@@ -360,10 +466,11 @@ pub async fn get_provider_models(
         )));
     }
 
-    let model_config = ModelConfig::new(&metadata.default_model)?.with_canonical_limits(&name);
-    let provider = goose::providers::create(&name, model_config, Vec::new()).await?;
+    let provider = goose::providers::create(&name, Vec::new()).await?;
 
-    let models_result = provider.fetch_recommended_model_info().await;
+    let models_result = provider
+        .fetch_recommended_model_info(goose::model_config::global_toolshim())
+        .await;
 
     match models_result {
         Ok(models) => Ok(Json(models)),
@@ -394,8 +501,8 @@ pub async fn resolve_provider_model_info(
         )));
     }
 
-    let model_config = ModelConfig::new(model)?.with_canonical_limits(name);
-    let provider = goose::providers::create(name, model_config.clone(), Vec::new()).await?;
+    let model_config = goose::model_config::model_config_from_user_config(name, model)?;
+    let provider = goose::providers::create(name, Vec::new()).await?;
     match provider.fetch_model_info(model).await {
         Ok(info) => Ok(info),
         Err(error) => {
@@ -546,7 +653,7 @@ pub async fn get_canonical_model_info(
         max_output_tokens: canonical_model.limit.output,
         reasoning: canonical_model
             .reasoning
-            .unwrap_or_else(|| ModelConfig::new_or_fail(&query.model).is_reasoning_model()),
+            .unwrap_or_else(|| ModelConfig::new(&query.model).is_reasoning_model()),
         // Costs are per million tokens - client handles division for display
         input_token_cost: canonical_model.cost.input,
         output_token_cost: canonical_model.cost.output,
@@ -559,30 +666,6 @@ pub async fn get_canonical_model_info(
         model_info,
         source: "canonical".to_string(),
     })
-}
-
-#[utoipa::path(
-    post,
-    path = "/config/permissions",
-    request_body = UpsertPermissionsQuery,
-    responses(
-        (status = 200, description = "Permission update completed", body = String),
-        (status = 400, description = "Invalid request"),
-    )
-)]
-pub async fn upsert_permissions(
-    Json(query): Json<UpsertPermissionsQuery>,
-) -> Result<Json<String>, ErrorResponse> {
-    let permission_manager = goose::config::PermissionManager::instance();
-
-    for tool_permission in &query.tool_permissions {
-        permission_manager.update_user_permission(
-            &tool_permission.tool_name,
-            tool_permission.permission.clone(),
-        );
-    }
-
-    Ok(Json("Permissions updated successfully".to_string()))
 }
 
 #[utoipa::path(
@@ -746,7 +829,6 @@ pub async fn update_custom_provider(
 pub async fn check_provider(
     Json(CheckProviderRequest { provider }): Json<CheckProviderRequest>,
 ) -> Result<(), ErrorResponse> {
-    // Provider check does not use extensions.
     create_with_default_model(&provider, Vec::new())
         .await
         .map_err(|err| {
@@ -763,7 +845,6 @@ pub async fn check_provider(
 pub async fn set_config_provider(
     Json(SetProviderRequest { provider, model }): Json<SetProviderRequest>,
 ) -> Result<(), ErrorResponse> {
-    // Provider validation does not use extensions.
     create_with_default_model(&provider, Vec::new())
         .await
         .and_then(|_| {
@@ -828,86 +909,20 @@ pub async fn get_provider_catalog_template(
     Ok(Json(template))
 }
 
-#[utoipa::path(
-    post,
-    path = "/config/providers/{name}/oauth",
-    params(
-        ("name" = String, Path, description = "Provider name")
-    ),
-    responses(
-        (status = 200, description = "OAuth configuration completed"),
-        (status = 400, description = "OAuth configuration failed")
-    )
-)]
-pub async fn configure_provider_oauth(
-    Path(provider_name): Path<String>,
-) -> Result<Json<String>, ErrorResponse> {
-    use goose::model::ModelConfig;
-    use goose::providers::create;
-
-    if !is_valid_provider_name(&provider_name) {
-        return Err(ErrorResponse::bad_request(format!(
-            "Invalid provider name: '{}'",
-            provider_name
-        )));
-    }
-
-    let temp_model = ModelConfig::new("temp")
-        .map_err(|e| {
-            ErrorResponse::bad_request(format!("Failed to create temporary model config: {}", e))
-        })?
-        .with_canonical_limits(&provider_name);
-
-    // OAuth configuration does not use extensions.
-    let provider = create(&provider_name, temp_model, Vec::new())
-        .await
-        .map_err(|e| {
-            ErrorResponse::bad_request(format!(
-                "Failed to create provider '{}': {}",
-                provider_name, e
-            ))
-        })?;
-
-    provider.configure_oauth().await.map_err(|e| {
-        ErrorResponse::bad_request(format!(
-            "OAuth configuration failed for provider '{}': {}",
-            provider_name, e
-        ))
-    })?;
-
-    // Mark the provider as configured after successful OAuth
-    let config = goose::config::Config::global();
-    if let Some(mut entry) = goose::config::get_provider_entry(config, &provider_name) {
-        entry.configured = true;
-        goose::config::set_provider_entry(config, &provider_name, &entry)?;
-    } else {
-        let model = if goose::config::get_active_provider(config).as_deref()
-            == Some(provider_name.as_str())
-        {
-            config.get_goose_model().unwrap_or_default()
-        } else {
-            String::new()
-        };
-        goose::config::set_provider_entry(
-            config,
-            &provider_name,
-            &goose::config::ProviderEntry {
-                enabled: true,
-                model,
-                configured: true,
-            },
-        )?;
-    }
-
-    Ok(Json("OAuth configuration completed".to_string()))
-}
-
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/config", get(read_all_config))
         .route("/config/upsert", post(upsert_config))
         .route("/config/remove", post(remove_config))
         .route("/config/read", post(read_config))
+        .route("/config/provider-secrets", get(list_provider_secrets))
+        .route(
+            "/config/provider-secrets/{id}",
+            delete(delete_provider_secret),
+        )
+        .route("/config/extensions", get(get_extensions))
+        .route("/config/extensions", post(add_extension))
+        .route("/config/extensions/{name}", delete(remove_extension))
         .route("/config/providers", get(providers))
         .route("/config/providers/{name}/models", get(get_provider_models))
         .route(
@@ -929,7 +944,6 @@ pub fn routes(state: Arc<AppState>) -> Router {
             post(get_canonical_model_info),
         )
         .route("/config/validate", get(validate_config))
-        .route("/config/permissions", post(upsert_permissions))
         .route("/config/custom-providers", post(create_custom_provider))
         .route(
             "/config/custom-providers/{id}",
@@ -939,12 +953,5 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/config/custom-providers/{id}", get(get_custom_provider))
         .route("/config/check_provider", post(check_provider))
         .route("/config/set_provider", post(set_config_provider))
-        .route(
-            "/config/providers/{name}/oauth",
-            post(configure_provider_oauth),
-        )
         .with_state(state)
 }
-
-#[cfg(test)]
-mod tests {}
