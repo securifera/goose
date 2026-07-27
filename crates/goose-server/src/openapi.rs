@@ -28,10 +28,11 @@ use goose::config::declarative_providers::{
 };
 use goose::conversation::message::{
     ActionRequired, ActionRequiredData, FrontendToolRequest, InferenceMetadata, Message,
-    MessageContent, MessageMetadata, RedactedThinkingContent, SystemNotificationContent,
-    SystemNotificationType, ThinkingContent, TokenState, ToolConfirmationRequest, ToolRequest,
-    ToolResponse,
+    MessageContent, MessageMetadata, MessageUsage, RedactedThinkingContent,
+    SystemNotificationContent, SystemNotificationType, ThinkingContent, TokenState,
+    ToolConfirmationRequest, ToolRequest, ToolResponse,
 };
+use goose::providers::base::CostSource;
 
 use crate::routes::recipe_utils::RecipeManifest;
 use crate::routes::reply::MessageEvent;
@@ -512,6 +513,8 @@ derive_utoipa!(IconTheme as IconThemeSchema);
         MessageContent,
         MessageMetadata,
         InferenceMetadata,
+        MessageUsage,
+        CostSource,
         TokenState,
         Usage,
         ContentSchema,
@@ -656,33 +659,8 @@ pub struct ApiDoc;
         super::routes::dictation::get_download_progress,
         super::routes::dictation::cancel_download,
         super::routes::dictation::delete_model,
-        super::routes::local_inference::list_local_models,
-        super::routes::local_inference::sync_featured_models,
-        super::routes::local_inference::search_hf_models,
-        super::routes::local_inference::list_builtin_chat_templates,
-        super::routes::local_inference::get_repo_files,
-        super::routes::local_inference::download_hf_model,
-        super::routes::local_inference::get_local_model_download_progress,
-        super::routes::local_inference::cancel_local_model_download,
-        super::routes::local_inference::delete_local_model,
-        super::routes::local_inference::get_model_settings,
-        super::routes::local_inference::update_model_settings,
     ),
-    components(schemas(
-        super::routes::dictation::WhisperModelResponse,
-        super::routes::local_inference::LocalModelResponse,
-        super::routes::local_inference::ModelDownloadStatus,
-        super::routes::local_inference::DownloadModelRequest,
-        goose::providers::local_inference::hf_models::HfModelInfo,
-        goose::providers::local_inference::hf_models::HfModelVariant,
-        goose::providers::local_inference::hf_models::HfGgufFile,
-        goose::providers::local_inference::hf_models::HfQuantVariant,
-        super::routes::local_inference::RepoVariantsResponse,
-        goose::providers::local_inference::local_model_registry::ModelSettings,
-        goose::providers::local_inference::local_model_registry::ChatTemplate,
-        goose::providers::local_inference::local_model_registry::SamplingConfig,
-        goose::providers::local_inference::local_model_registry::ToolCallingMode,
-    ))
+    components(schemas(super::routes::dictation::WhisperModelResponse,))
 )]
 pub struct LocalInferenceApiDoc;
 
