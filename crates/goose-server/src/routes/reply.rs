@@ -76,7 +76,7 @@ pub fn track_tool_telemetry(content: &MessageContent, all_messages: &[Message]) 
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ChatRequest {
     user_message: Message,
     /// Override the server's conversation history. Only use this when you need absolute control
@@ -123,7 +123,7 @@ impl IntoResponse for SseResponse {
     }
 }
 
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum MessageEvent {
     Message {
@@ -145,7 +145,6 @@ pub enum MessageEvent {
     },
     Notification {
         request_id: String,
-        #[schema(value_type = Object)]
         message: ServerNotification,
     },
     UpdateConversation {
@@ -198,18 +197,6 @@ async fn stream_event(
 }
 
 #[allow(clippy::too_many_lines)]
-#[utoipa::path(
-    post,
-    path = "/reply",
-    request_body = ChatRequest,
-    responses(
-        (status = 200, description = "Streaming response initiated",
-         body = MessageEvent,
-         content_type = "text/event-stream"),
-        (status = 424, description = "Agent not initialized"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn reply(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ChatRequest>,

@@ -28,7 +28,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 // ── Request / Response types ────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SessionReplyRequest {
     /// Client-generated UUIDv7 identifying this request.
     pub request_id: String,
@@ -37,12 +37,12 @@ pub struct SessionReplyRequest {
     pub override_conversation: Option<Vec<Message>>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct SessionReplyResponse {
     pub request_id: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CancelRequest {
     pub request_id: String,
 }
@@ -116,19 +116,6 @@ fn serialize_session_event(seq: u64, request_id: Option<&str>, event: &MessageEv
 
 // ── GET /sessions/{id}/events ───────────────────────────────────────────
 
-#[utoipa::path(
-    get,
-    path = "/sessions/{id}/events",
-    params(
-        ("id" = String, Path, description = "Session ID"),
-    ),
-    responses(
-        (status = 200, description = "SSE event stream",
-         body = MessageEvent,
-         content_type = "text/event-stream"),
-        (status = 404, description = "Session not found"),
-    )
-)]
 pub async fn session_events(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -254,22 +241,6 @@ pub async fn session_events(
 
 // ── POST /sessions/{id}/reply ───────────────────────────────────────────
 
-#[utoipa::path(
-    post,
-    path = "/sessions/{id}/reply",
-    params(
-        ("id" = String, Path, description = "Session ID"),
-    ),
-    request_body = SessionReplyRequest,
-    responses(
-        (status = 200, description = "Request accepted",
-         body = SessionReplyResponse),
-        (status = 400, description = "Invalid request"),
-        (status = 404, description = "Session not found"),
-        (status = 424, description = "Agent not initialized"),
-        (status = 500, description = "Internal server error"),
-    )
-)]
 pub async fn session_reply(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -607,17 +578,6 @@ pub async fn session_reply(
 
 // ── POST /sessions/{id}/cancel ──────────────────────────────────────────
 
-#[utoipa::path(
-    post,
-    path = "/sessions/{id}/cancel",
-    params(
-        ("id" = String, Path, description = "Session ID"),
-    ),
-    request_body = CancelRequest,
-    responses(
-        (status = 200, description = "Cancellation accepted"),
-    )
-)]
 pub async fn session_cancel(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,

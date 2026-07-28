@@ -21,21 +21,19 @@ use goose::download_manager::{get_download_manager, DownloadProgress};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use utoipa::ToSchema;
 
 const MAX_AUDIO_SIZE_BYTES: usize = 50 * 1024 * 1024;
 
 #[cfg(feature = "local-inference")]
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct WhisperModelResponse {
     #[serde(flatten)]
-    #[schema(inline)]
     model: &'static whisper::WhisperModel,
     downloaded: bool,
     recommended: bool,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize)]
 pub struct TranscribeRequest {
     /// Base64 encoded audio data
     pub audio: String,
@@ -45,13 +43,13 @@ pub struct TranscribeRequest {
     pub provider: DictationProvider,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TranscribeResponse {
     /// Transcribed text from the audio
     pub text: String,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct DictationProviderStatus {
     /// Whether the provider is fully configured and ready to use
     pub configured: bool,
@@ -125,23 +123,6 @@ fn convert_error(e: anyhow::Error) -> ErrorResponse {
     }
 }
 
-#[utoipa::path(
-    post,
-    path = "/dictation/transcribe",
-    request_body = TranscribeRequest,
-    responses(
-        (status = 200, description = "Audio transcribed successfully", body = TranscribeResponse),
-        (status = 400, description = "Invalid request (bad base64 or unsupported format)"),
-        (status = 401, description = "Invalid API key"),
-        (status = 412, description = "Provider not configured"),
-        (status = 413, description = "Audio file too large (max 50MB)"),
-        (status = 429, description = "Rate limit exceeded"),
-        (status = 500, description = "Internal server error"),
-        (status = 502, description = "Provider API error"),
-        (status = 503, description = "Service unavailable"),
-        (status = 504, description = "Request timeout")
-    )
-)]
 pub async fn transcribe_dictation(
     Json(request): Json<TranscribeRequest>,
 ) -> Result<Json<TranscribeResponse>, ErrorResponse> {
@@ -185,13 +166,6 @@ pub async fn transcribe_dictation(
     Ok(Json(TranscribeResponse { text }))
 }
 
-#[utoipa::path(
-    get,
-    path = "/dictation/config",
-    responses(
-        (status = 200, description = "Audio transcription provider configurations", body = HashMap<String, DictationProviderStatus>)
-    )
-)]
 pub async fn get_dictation_config(
 ) -> Result<Json<HashMap<DictationProvider, DictationProviderStatus>>, ErrorResponse> {
     let config = goose::config::Config::global();
@@ -231,13 +205,6 @@ pub async fn get_dictation_config(
 }
 
 #[cfg(feature = "local-inference")]
-#[utoipa::path(
-    get,
-    path = "/dictation/models",
-    responses(
-        (status = 200, description = "List of available Whisper models", body = Vec<WhisperModelResponse>)
-    )
-)]
 pub async fn list_models() -> Result<Json<Vec<WhisperModelResponse>>, ErrorResponse> {
     let recommended_id = whisper::recommend_model();
     let models = whisper::available_models()
@@ -253,15 +220,6 @@ pub async fn list_models() -> Result<Json<Vec<WhisperModelResponse>>, ErrorRespo
 }
 
 #[cfg(feature = "local-inference")]
-#[utoipa::path(
-    post,
-    path = "/dictation/models/{model_id}/download",
-    responses(
-        (status = 202, description = "Download started"),
-        (status = 400, description = "Download already in progress"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn download_model(Path(model_id): Path<String>) -> Result<StatusCode, ErrorResponse> {
     let model = whisper::get_model(&model_id)
         .ok_or_else(|| ErrorResponse::bad_request("Model not found"))?;
@@ -285,14 +243,6 @@ pub async fn download_model(Path(model_id): Path<String>) -> Result<StatusCode, 
 }
 
 #[cfg(feature = "local-inference")]
-#[utoipa::path(
-    get,
-    path = "/dictation/models/{model_id}/download",
-    responses(
-        (status = 200, description = "Download progress", body = DownloadProgress),
-        (status = 404, description = "Download not found")
-    )
-)]
 pub async fn get_download_progress(
     Path(model_id): Path<String>,
 ) -> Result<Json<DownloadProgress>, ErrorResponse> {
@@ -305,14 +255,6 @@ pub async fn get_download_progress(
 }
 
 #[cfg(feature = "local-inference")]
-#[utoipa::path(
-    delete,
-    path = "/dictation/models/{model_id}/download",
-    responses(
-        (status = 200, description = "Download cancelled"),
-        (status = 404, description = "Download not found")
-    )
-)]
 pub async fn cancel_download(Path(model_id): Path<String>) -> Result<StatusCode, ErrorResponse> {
     let manager = get_download_manager();
     manager.cancel_download(&model_id).map_err(convert_error)?;
@@ -320,15 +262,6 @@ pub async fn cancel_download(Path(model_id): Path<String>) -> Result<StatusCode,
 }
 
 #[cfg(feature = "local-inference")]
-#[utoipa::path(
-    delete,
-    path = "/dictation/models/{model_id}",
-    responses(
-        (status = 200, description = "Model deleted"),
-        (status = 404, description = "Model not found or not downloaded"),
-        (status = 500, description = "Failed to delete model")
-    )
-)]
 pub async fn delete_model(Path(model_id): Path<String>) -> Result<StatusCode, ErrorResponse> {
     let model = whisper::get_model(&model_id)
         .ok_or_else(|| ErrorResponse::bad_request("Model not found"))?;

@@ -30,30 +30,30 @@ fn validate_schedule_id(id: &str) -> Result<(), ErrorResponse> {
     Ok(())
 }
 
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize)]
 pub struct CreateScheduleRequest {
     id: String,
     recipe: Recipe,
     cron: String,
 }
 
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Deserialize, Serialize)]
 pub struct UpdateScheduleRequest {
     cron: String,
 }
 
-#[derive(Serialize, utoipa::ToSchema)]
+#[derive(Serialize)]
 pub struct ListSchedulesResponse {
     jobs: Vec<ScheduledJob>,
 }
 
 // Response for the kill endpoint
-#[derive(Serialize, utoipa::ToSchema)]
+#[derive(Serialize)]
 pub struct KillJobResponse {
     message: String,
 }
 
-#[derive(Serialize, utoipa::ToSchema)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectJobResponse {
     session_id: Option<String>,
@@ -62,18 +62,18 @@ pub struct InspectJobResponse {
 }
 
 // Response for the run_now endpoint
-#[derive(Serialize, utoipa::ToSchema)]
+#[derive(Serialize)]
 pub struct RunNowResponse {
     session_id: String,
 }
 
-#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[derive(Deserialize)]
 pub struct SessionsQuery {
     limit: usize,
 }
 
 // Struct for the frontend session list
-#[derive(Serialize, utoipa::ToSchema)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionDisplayInfo {
     id: String,
@@ -90,18 +90,6 @@ pub struct SessionDisplayInfo {
     accumulated_output_tokens: Option<i32>,
 }
 
-#[utoipa::path(
-    post,
-    path = "/schedule/create",
-    request_body = CreateScheduleRequest,
-    responses(
-        (status = 200, description = "Scheduled job created successfully", body = ScheduledJob),
-        (status = 400, description = "Invalid cron expression or recipe file"),
-        (status = 409, description = "Job ID already exists"),
-        (status = 500, description = "Internal server error")
-    ),
-    tag = "schedule"
-)]
 #[axum::debug_handler]
 async fn create_schedule(
     State(state): State<Arc<AppState>>,
@@ -168,15 +156,6 @@ async fn create_schedule(
     Ok(Json(job))
 }
 
-#[utoipa::path(
-    get,
-    path = "/schedule/list",
-    responses(
-        (status = 200, description = "A list of scheduled jobs", body = ListSchedulesResponse),
-        (status = 500, description = "Internal server error")
-    ),
-    tag = "schedule"
-)]
 #[axum::debug_handler]
 async fn list_schedules(
     State(state): State<Arc<AppState>>,
@@ -187,19 +166,6 @@ async fn list_schedules(
     Ok(Json(ListSchedulesResponse { jobs }))
 }
 
-#[utoipa::path(
-    delete,
-    path = "/schedule/delete/{id}",
-    params(
-        ("id" = String, Path, description = "ID of the schedule to delete")
-    ),
-    responses(
-        (status = 204, description = "Scheduled job removed successfully"),
-        (status = 404, description = "Scheduled job not found"),
-        (status = 500, description = "Internal server error")
-    ),
-    tag = "schedule"
-)]
 #[axum::debug_handler]
 async fn delete_schedule(
     State(state): State<Arc<AppState>>,
@@ -218,19 +184,6 @@ async fn delete_schedule(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[utoipa::path(
-    post,
-    path = "/schedule/{id}/run_now",
-    params(
-        ("id" = String, Path, description = "ID of the schedule to run")
-    ),
-    responses(
-        (status = 200, description = "Scheduled job triggered successfully, returns new session ID", body = RunNowResponse),
-        (status = 404, description = "Scheduled job not found"),
-        (status = 500, description = "Internal server error when trying to run the job")
-    ),
-    tag = "schedule"
-)]
 #[axum::debug_handler]
 async fn run_now_handler(
     State(state): State<Arc<AppState>>,
@@ -312,19 +265,6 @@ async fn run_now_handler(
     }
 }
 
-#[utoipa::path(
-    get,
-    path = "/schedule/{id}/sessions",
-    params(
-        ("id" = String, Path, description = "ID of the schedule"),
-        SessionsQuery // This will automatically pick up 'limit' as a query parameter
-    ),
-    responses(
-        (status = 200, description = "A list of session display info", body = Vec<SessionDisplayInfo>),
-        (status = 500, description = "Internal server error")
-    ),
-    tag = "schedule"
-)]
 #[axum::debug_handler]
 async fn sessions_handler(
     State(state): State<Arc<AppState>>,
@@ -358,20 +298,6 @@ async fn sessions_handler(
     Ok(Json(display_infos))
 }
 
-#[utoipa::path(
-    post,
-    path = "/schedule/{id}/pause",
-    params(
-        ("id" = String, Path, description = "ID of the schedule to pause")
-    ),
-    responses(
-        (status = 204, description = "Scheduled job paused successfully"),
-        (status = 404, description = "Scheduled job not found"),
-        (status = 400, description = "Cannot pause a currently running job"),
-        (status = 500, description = "Internal server error")
-    ),
-    tag = "schedule"
-)]
 #[axum::debug_handler]
 async fn pause_schedule(
     State(state): State<Arc<AppState>>,
@@ -391,19 +317,6 @@ async fn pause_schedule(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[utoipa::path(
-    post,
-    path = "/schedule/{id}/unpause",
-    params(
-        ("id" = String, Path, description = "ID of the schedule to unpause")
-    ),
-    responses(
-        (status = 204, description = "Scheduled job unpaused successfully"),
-        (status = 404, description = "Scheduled job not found"),
-        (status = 500, description = "Internal server error")
-    ),
-    tag = "schedule"
-)]
 #[axum::debug_handler]
 async fn unpause_schedule(
     State(state): State<Arc<AppState>>,
@@ -420,21 +333,6 @@ async fn unpause_schedule(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[utoipa::path(
-    put,
-    path = "/schedule/{id}",
-    params(
-        ("id" = String, Path, description = "ID of the schedule to update")
-    ),
-    request_body = UpdateScheduleRequest,
-    responses(
-        (status = 200, description = "Scheduled job updated successfully", body = ScheduledJob),
-        (status = 404, description = "Scheduled job not found"),
-        (status = 400, description = "Cannot update a currently running job or invalid request"),
-        (status = 500, description = "Internal server error")
-    ),
-    tag = "schedule"
-)]
 #[axum::debug_handler]
 async fn update_schedule(
     State(state): State<Arc<AppState>>,
@@ -468,14 +366,6 @@ async fn update_schedule(
     Ok(Json(updated_job))
 }
 
-#[utoipa::path(
-    post,
-    path = "/schedule/{id}/kill",
-    responses(
-        (status = 200, description = "Running job killed successfully"),
-    ),
-    tag = "schedule"
-)]
 #[axum::debug_handler]
 pub async fn kill_running_job(
     State(state): State<Arc<AppState>>,
@@ -498,19 +388,6 @@ pub async fn kill_running_job(
     }))
 }
 
-#[utoipa::path(
-    get,
-    path = "/schedule/{id}/inspect",
-    params(
-        ("id" = String, Path, description = "ID of the schedule to inspect")
-    ),
-    responses(
-        (status = 200, description = "Running job information", body = InspectJobResponse),
-        (status = 404, description = "Scheduled job not found"),
-        (status = 500, description = "Internal server error")
-    ),
-    tag = "schedule"
-)]
 #[axum::debug_handler]
 pub async fn inspect_running_job(
     State(state): State<Arc<AppState>>,

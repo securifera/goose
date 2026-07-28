@@ -14,7 +14,6 @@ use goose::{recipe_deeplink, slash_commands::recipe_slash_command};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_path_to_error::deserialize as deserialize_with_path;
-use utoipa::ToSchema;
 
 fn format_json_rejection_message(rejection: &JsonRejection) -> String {
     match rejection {
@@ -43,100 +42,90 @@ use crate::routes::recipe_utils::{
 };
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize)]
 pub struct EncodeRecipeRequest {
     recipe: Recipe,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct EncodeRecipeResponse {
     deeplink: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize)]
 pub struct DecodeRecipeRequest {
     deeplink: String,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct DecodeRecipeResponse {
     recipe: Recipe,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize)]
 pub struct ScanRecipeRequest {
     recipe: Recipe,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct ScanRecipeResponse {
     has_security_warnings: bool,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize)]
 pub struct SaveRecipeRequest {
     recipe: Recipe,
     id: Option<String>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct SaveRecipeResponse {
     id: String,
     file_name: String,
     file_path: String,
 }
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize)]
 pub struct ParseRecipeRequest {
     pub content: String,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct ParseRecipeResponse {
     pub recipe: Recipe,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize)]
 pub struct DeleteRecipeRequest {
     id: String,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct ListRecipeResponse {
     manifests: Vec<RecipeManifest>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize)]
 pub struct ScheduleRecipeRequest {
     id: String,
     cron_schedule: Option<String>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize)]
 pub struct SetSlashCommandRequest {
     id: String,
     slash_command: Option<String>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize)]
 pub struct RecipeToYamlRequest {
     recipe: Recipe,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct RecipeToYamlResponse {
     yaml: String,
 }
 
-#[utoipa::path(
-    post,
-    path = "/recipes/encode",
-    request_body = EncodeRecipeRequest,
-    responses(
-        (status = 200, description = "Recipe encoded successfully", body = EncodeRecipeResponse),
-        (status = 400, description = "Bad request")
-    ),
-    tag = "Recipe Management"
-)]
 async fn encode_recipe(
     Json(request): Json<EncodeRecipeRequest>,
 ) -> Result<Json<EncodeRecipeResponse>, StatusCode> {
@@ -151,16 +140,6 @@ async fn encode_recipe(
     }
 }
 
-#[utoipa::path(
-    post,
-    path = "/recipes/decode",
-    request_body = DecodeRecipeRequest,
-    responses(
-        (status = 200, description = "Recipe decoded successfully", body = DecodeRecipeResponse),
-        (status = 400, description = "Bad request")
-    ),
-    tag = "Recipe Management"
-)]
 async fn decode_recipe(
     Json(request): Json<DecodeRecipeRequest>,
 ) -> Result<Json<DecodeRecipeResponse>, StatusCode> {
@@ -178,15 +157,6 @@ async fn decode_recipe(
     }
 }
 
-#[utoipa::path(
-    post,
-    path = "/recipes/scan",
-    request_body = ScanRecipeRequest,
-    responses(
-        (status = 200, description = "Recipe scanned successfully", body = ScanRecipeResponse),
-    ),
-    tag = "Recipe Management"
-)]
 async fn scan_recipe(
     Json(request): Json<ScanRecipeRequest>,
 ) -> Result<Json<ScanRecipeResponse>, StatusCode> {
@@ -197,16 +167,6 @@ async fn scan_recipe(
     }))
 }
 
-#[utoipa::path(
-    get,
-    path = "/recipes/list",
-    responses(
-        (status = 200, description = "Get recipe list successfully", body = ListRecipeResponse),
-        (status = 401, description = "Unauthorized - Invalid or missing API key"),
-        (status = 500, description = "Internal server error")
-    ),
-    tag = "Recipe Management"
-)]
 async fn list_recipes(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListRecipeResponse>, StatusCode> {
@@ -242,18 +202,6 @@ async fn list_recipes(
     Ok(Json(ListRecipeResponse { manifests }))
 }
 
-#[utoipa::path(
-    post,
-    path = "/recipes/delete",
-    request_body = DeleteRecipeRequest,
-    responses(
-        (status = 204, description = "Recipe deleted successfully"),
-        (status = 401, description = "Unauthorized - Invalid or missing API key"),
-        (status = 404, description = "Recipe not found"),
-        (status = 500, description = "Internal server error")
-    ),
-    tag = "Recipe Management"
-)]
 async fn delete_recipe(
     State(state): State<Arc<AppState>>,
     Json(request): Json<DeleteRecipeRequest>,
@@ -270,17 +218,6 @@ async fn delete_recipe(
     StatusCode::NO_CONTENT
 }
 
-#[utoipa::path(
-    post,
-    path = "/recipes/schedule",
-    request_body = ScheduleRecipeRequest,
-    responses(
-        (status = 200, description = "Recipe scheduled successfully"),
-        (status = 404, description = "Recipe not found"),
-        (status = 500, description = "Internal server error")
-    ),
-    tag = "Recipe Management"
-)]
 async fn schedule_recipe(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ScheduleRecipeRequest>,
@@ -305,17 +242,6 @@ async fn schedule_recipe(
     }
 }
 
-#[utoipa::path(
-    post,
-    path = "/recipes/slash-command",
-    request_body = SetSlashCommandRequest,
-    responses(
-        (status = 200, description = "Slash command set successfully"),
-        (status = 404, description = "Recipe not found"),
-        (status = 500, description = "Internal server error")
-    ),
-    tag = "Recipe Management"
-)]
 async fn set_recipe_slash_command(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SetSlashCommandRequest>,
@@ -334,19 +260,6 @@ async fn set_recipe_slash_command(
     }
 }
 
-#[utoipa::path(
-    post,
-    path = "/recipes/save",
-    request_body = SaveRecipeRequest,
-    responses(
-        (status = 204, description = "Recipe saved to file successfully", body = SaveRecipeResponse),
-        (status = 401, description = "Unauthorized - Invalid or missing API key"),
-        (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 404, description = "Not found", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    ),
-    tag = "Recipe Management"
-)]
 async fn save_recipe(
     State(state): State<Arc<AppState>>,
     payload: Result<Json<Value>, JsonRejection>,
@@ -427,17 +340,6 @@ fn deserialize_save_recipe_request(value: Value) -> Result<SaveRecipeRequest, Er
     })
 }
 
-#[utoipa::path(
-    post,
-    path = "/recipes/parse",
-    request_body = ParseRecipeRequest,
-    responses(
-        (status = 200, description = "Recipe parsed successfully", body = ParseRecipeResponse),
-        (status = 400, description = "Bad request - Invalid recipe format", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    ),
-    tag = "Recipe Management"
-)]
 async fn parse_recipe(
     Json(request): Json<ParseRecipeRequest>,
 ) -> Result<Json<ParseRecipeResponse>, ErrorResponse> {
@@ -451,16 +353,6 @@ async fn parse_recipe(
     Ok(Json(ParseRecipeResponse { recipe }))
 }
 
-#[utoipa::path(
-    post,
-    path = "/recipes/to-yaml",
-    request_body = RecipeToYamlRequest,
-    responses(
-        (status = 200, description = "Recipe converted to YAML successfully", body = RecipeToYamlResponse),
-        (status = 400, description = "Bad request - Failed to convert recipe to YAML", body = ErrorResponse),
-    ),
-    tag = "Recipe Management"
-)]
 async fn recipe_to_yaml(
     Json(request): Json<RecipeToYamlRequest>,
 ) -> Result<Json<RecipeToYamlResponse>, ErrorResponse> {

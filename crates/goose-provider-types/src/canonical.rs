@@ -28,7 +28,7 @@ impl ModelMapping {
 ///
 /// This avoids network calls by looking up all known models for the provider,
 /// filtering to text-input + tool-calling models, and sorting by release date.
-/// The returned names are the canonical short names (e.g. "claude-3.5-sonnet").
+/// The returned names are the canonical short names (e.g. "claude-sonnet-4.5").
 ///
 /// TODO: This trades speed for correctness — the canonical registry may not perfectly
 /// match what the provider API returns (new models not yet in the registry, deprecated
@@ -110,8 +110,18 @@ mod tests {
 
     #[test]
     fn cloud_provider_retains_cost() {
-        let canonical = maybe_get_canonical_model("anthropic", "claude-3-5-sonnet-20241022")
-            .expect("claude-3.5-sonnet should resolve");
+        let canonical = maybe_get_canonical_model("anthropic", "claude-sonnet-4-5-20250929")
+            .expect("claude-sonnet-4.5 should resolve");
+        assert!(canonical.cost.input.is_some());
+        assert!(canonical.cost.output.is_some());
+    }
+
+    #[test]
+    fn anthropic_opus_5_resolves() {
+        let canonical = maybe_get_canonical_model("anthropic", "claude-opus-5")
+            .expect("claude-opus-5 should resolve");
+        assert_eq!(canonical.limit.context, 1_000_000);
+        assert_eq!(canonical.limit.output, Some(128_000));
         assert!(canonical.cost.input.is_some());
         assert!(canonical.cost.output.is_some());
     }

@@ -6,9 +6,8 @@ use goose::permission::{Permission, PermissionConfirmation};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
-use utoipa::ToSchema;
 
-#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfirmToolActionRequest {
     id: String,
@@ -22,16 +21,6 @@ fn default_principal_type() -> PrincipalType {
     PrincipalType::Tool
 }
 
-#[utoipa::path(
-    post,
-    path = "/action-required/tool-confirmation",
-    request_body = ConfirmToolActionRequest,
-    responses(
-        (status = 200, description = "Tool confirmation action is confirmed", body = Value),
-        (status = 401, description = "Unauthorized - invalid secret key"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn confirm_tool_action(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ConfirmToolActionRequest>,

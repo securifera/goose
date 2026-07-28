@@ -131,22 +131,6 @@ struct AppState {
     guest_store: GuestHtmlStore,
 }
 
-#[utoipa::path(
-    get,
-    path = "/mcp-app-proxy",
-    params(
-        ("secret" = String, Query, description = "Secret key for authentication"),
-        ("connect_domains" = Option<String>, Query, description = "Comma-separated domains for connect-src"),
-        ("resource_domains" = Option<String>, Query, description = "Comma-separated domains for resource loading"),
-        ("frame_domains" = Option<String>, Query, description = "Comma-separated origins for nested iframes (frame-src)"),
-        ("base_uri_domains" = Option<String>, Query, description = "Comma-separated allowed base URIs (base-uri)"),
-        ("script_domains" = Option<String>, Query, description = "Comma-separated domains for script-src")
-    ),
-    responses(
-        (status = 200, description = "MCP App proxy HTML page", content_type = "text/html"),
-        (status = 401, description = "Unauthorized - invalid or missing secret"),
-    )
-)]
 async fn mcp_app_proxy(
     axum::extract::State(state): axum::extract::State<AppState>,
     Query(params): Query<ProxyQuery>,

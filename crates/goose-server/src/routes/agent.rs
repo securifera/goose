@@ -30,12 +30,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::error;
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize)]
 pub struct UpdateFromSessionRequest {
     session_id: String,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize)]
 pub struct UpdateProviderRequest {
     provider: String,
     model: Option<String>,
@@ -44,19 +44,19 @@ pub struct UpdateProviderRequest {
     request_params: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize)]
 pub struct UpdateSessionRequest {
     session_id: String,
     goose_mode: Option<String>,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize)]
 pub struct GetToolsQuery {
     extension_name: Option<String>,
     session_id: String,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize)]
 pub struct StartAgentRequest {
     working_dir: String,
     #[serde(default)]
@@ -69,69 +69,58 @@ pub struct StartAgentRequest {
     extension_overrides: Option<Vec<ExtensionConfig>>,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize)]
 pub struct StopAgentRequest {
     session_id: String,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize)]
 pub struct RestartAgentRequest {
     session_id: String,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize)]
 pub struct UpdateWorkingDirRequest {
     session_id: String,
     working_dir: String,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize)]
 pub struct ResumeAgentRequest {
     session_id: String,
     load_model_and_extensions: bool,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize)]
 pub struct AddExtensionRequest {
     session_id: String,
     config: ExtensionConfig,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize)]
 pub struct RemoveExtensionRequest {
     name: String,
     session_id: String,
 }
 
-#[derive(Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize)]
 pub struct SetContainerRequest {
     session_id: String,
     container_id: Option<String>,
 }
 
-#[derive(Serialize, utoipa::ToSchema)]
+#[derive(Serialize)]
 pub struct ResumeAgentResponse {
     pub session: Session,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension_results: Option<Vec<ExtensionLoadResult>>,
 }
 
-#[derive(Serialize, utoipa::ToSchema)]
+#[derive(Serialize)]
 pub struct RestartAgentResponse {
     pub extension_results: Vec<ExtensionLoadResult>,
 }
 
-#[utoipa::path(
-    post,
-    path = "/agent/start",
-    request_body = StartAgentRequest,
-    responses(
-        (status = 200, description = "Agent started successfully", body = Session),
-        (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 401, description = "Unauthorized - invalid secret key"),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    )
-)]
 #[allow(clippy::too_many_lines)]
 async fn start_agent(
     State(state): State<Arc<AppState>>,
@@ -323,17 +312,6 @@ async fn start_agent(
     Ok(Json(session))
 }
 
-#[utoipa::path(
-    post,
-    path = "/agent/resume",
-    request_body = ResumeAgentRequest,
-    responses(
-        (status = 200, description = "Agent started successfully", body = ResumeAgentResponse),
-        (status = 400, description = "Bad request - invalid working directory"),
-        (status = 401, description = "Unauthorized - invalid secret key"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 async fn resume_agent(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ResumeAgentRequest>,
@@ -441,16 +419,6 @@ async fn resume_agent(
     }))
 }
 
-#[utoipa::path(
-    post,
-    path = "/agent/update_from_session",
-    request_body = UpdateFromSessionRequest,
-    responses(
-        (status = 200, description = "Update agent from session data successfully"),
-        (status = 401, description = "Unauthorized - invalid secret key"),
-        (status = 424, description = "Agent not initialized"),
-    ),
-)]
 async fn update_from_session(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpdateFromSessionRequest>,
@@ -507,20 +475,6 @@ async fn update_from_session(
     Ok(StatusCode::OK)
 }
 
-#[utoipa::path(
-    get,
-    path = "/agent/tools",
-    params(
-        ("extension_name" = Option<String>, Query, description = "Optional extension name to filter tools"),
-        ("session_id" = String, Query, description = "Required session ID to scope tools to a specific session")
-    ),
-    responses(
-        (status = 200, description = "Tools retrieved successfully", body = Vec<ToolInfo>),
-        (status = 401, description = "Unauthorized - invalid secret key"),
-        (status = 424, description = "Agent not initialized"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 async fn get_tools(
     State(state): State<Arc<AppState>>,
     Query(query): Query<GetToolsQuery>,
@@ -566,18 +520,6 @@ async fn get_tools(
     Ok(Json(tools))
 }
 
-#[utoipa::path(
-    post,
-    path = "/agent/update_provider",
-    request_body = UpdateProviderRequest,
-    responses(
-        (status = 200, description = "Provider updated successfully"),
-        (status = 400, description = "Bad request - missing or invalid parameters"),
-        (status = 401, description = "Unauthorized - invalid secret key"),
-        (status = 424, description = "Agent not initialized"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 async fn update_agent_provider(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpdateProviderRequest>,
@@ -649,16 +591,6 @@ async fn update_agent_provider(
     Ok(())
 }
 
-#[utoipa::path(
-    post,
-    path = "/agent/update_session",
-    request_body = UpdateSessionRequest,
-    responses(
-        (status = 200, description = "Session updated"),
-        (status = 400, description = "Invalid request"),
-        (status = 500, description = "Internal error")
-    )
-)]
 async fn update_session(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpdateSessionRequest>,
@@ -690,17 +622,6 @@ async fn update_session(
     Ok(())
 }
 
-#[utoipa::path(
-    post,
-    path = "/agent/add_extension",
-    request_body = AddExtensionRequest,
-    responses(
-        (status = 200, description = "Extension added", body = String),
-        (status = 401, description = "Unauthorized - invalid secret key"),
-        (status = 424, description = "Agent not initialized"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 async fn agent_add_extension(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AddExtensionRequest>,
@@ -739,17 +660,6 @@ async fn agent_add_extension(
     Ok(StatusCode::OK)
 }
 
-#[utoipa::path(
-    post,
-    path = "/agent/remove_extension",
-    request_body = RemoveExtensionRequest,
-    responses(
-        (status = 200, description = "Extension removed", body = String),
-        (status = 401, description = "Unauthorized - invalid secret key"),
-        (status = 424, description = "Agent not initialized"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 async fn agent_remove_extension(
     State(state): State<Arc<AppState>>,
     Json(request): Json<RemoveExtensionRequest>,
@@ -772,17 +682,6 @@ async fn agent_remove_extension(
     Ok(StatusCode::OK)
 }
 
-#[utoipa::path(
-    post,
-    path = "/agent/set_container",
-    request_body = SetContainerRequest,
-    responses(
-        (status = 200, description = "Container set successfully"),
-        (status = 401, description = "Unauthorized - invalid secret key"),
-        (status = 424, description = "Agent not initialized"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 async fn set_container(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SetContainerRequest>,
@@ -795,17 +694,6 @@ async fn set_container(
     Ok(StatusCode::OK)
 }
 
-#[utoipa::path(
-    post,
-    path = "/agent/stop",
-    request_body = StopAgentRequest,
-    responses(
-        (status = 200, description = "Agent stopped successfully", body = String),
-        (status = 401, description = "Unauthorized - invalid secret key"),
-        (status = 404, description = "Session not found"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 async fn stop_agent(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<StopAgentRequest>,
@@ -891,17 +779,6 @@ async fn restart_agent_internal(
     Ok(extension_results)
 }
 
-#[utoipa::path(
-    post,
-    path = "/agent/restart",
-    request_body = RestartAgentRequest,
-    responses(
-        (status = 200, description = "Agent restarted successfully", body = RestartAgentResponse),
-        (status = 401, description = "Unauthorized - invalid secret key"),
-        (status = 404, description = "Session not found"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 async fn restart_agent(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<RestartAgentRequest>,
@@ -925,18 +802,6 @@ async fn restart_agent(
     Ok(Json(RestartAgentResponse { extension_results }))
 }
 
-#[utoipa::path(
-    post,
-    path = "/agent/update_working_dir",
-    request_body = UpdateWorkingDirRequest,
-    responses(
-        (status = 200, description = "Working directory updated and agent restarted successfully"),
-        (status = 400, description = "Bad request - invalid directory path"),
-        (status = 401, description = "Unauthorized - invalid secret key"),
-        (status = 404, description = "Session not found"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 async fn update_working_dir(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UpdateWorkingDirRequest>,

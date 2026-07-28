@@ -72,7 +72,6 @@ config = { version = "0.15", default-features = false, features = ["toml"] }
 thiserror = { workspace = true }
 clap = { workspace = true }
 serde_yaml = { workspace = true }
-utoipa = { workspace = true, features = ["axum_extras", "chrono"] }
 reqwest = { workspace = true, features = ["json", "blocking", "multipart", "system-proxy"] }
 tokio-util = { workspace = true }
 serde_path_to_error = { version = "0.1.8", default-features = false }
@@ -89,9 +88,6 @@ winreg = { version = "0.56", default-features = false }
 name = "goosed"
 path = "src/main.rs"
 
-[[bin]]
-name = "generate_schema"
-path = "src/bin/generate_schema.rs"
 
 [dev-dependencies]
 tower = { version = "0.5.2", default-features = false }

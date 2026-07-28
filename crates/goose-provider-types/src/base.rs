@@ -3,12 +3,11 @@ use futures::Stream;
 use rmcp::model::Tool;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
-use utoipa::ToSchema;
 
 use crate::{
     canonical::{map_to_canonical_model, CanonicalModelRegistry},
     conversation::{
-        message::{Message, MessageContent},
+        message::{Message, MessageContentBlock},
         token_usage::{ProviderUsage, Usage},
     },
     errors::ProviderError,
@@ -19,7 +18,7 @@ use crate::{
 };
 
 /// Metadata about a provider's configuration requirements and capabilities
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderMetadata {
     /// The unique identifier for this provider
     pub name: String,
@@ -129,7 +128,7 @@ impl ProviderMetadata {
 }
 
 /// Configuration key metadata for provider setup
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigKey {
     /// The name of the configuration key (e.g., "API_KEY")
     pub name: String,
@@ -218,7 +217,7 @@ impl ConfigKey {
 }
 
 /// Information about a model's capabilities
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelInfo {
     /// The name of the model
     pub name: String,
@@ -338,9 +337,17 @@ pub async fn collect_stream(
                         match (&mut prev.content.last_mut(), &new_content) {
                             // Coalesce consecutive text blocks
                             (
-                                Some(MessageContent::Text(last_text)),
-                                MessageContent::Text(new_text),
-                            ) => {
+                                Some(MessageContentBlock::Text(last_text)),
+                                MessageContentBlock::Text(new_text),
+                            ) if last_text
+                                .annotations
+                                .as_ref()
+                                .and_then(|a| a.audience.as_ref())
+                                == new_text
+                                    .annotations
+                                    .as_ref()
+                                    .and_then(|a| a.audience.as_ref()) =>
+                            {
                                 last_text.text.push_str(&new_text.text);
                             }
                             _ => {
@@ -359,13 +366,21 @@ pub async fn collect_stream(
         }
     }
 
-    match final_message {
-        Some(msg) => {
-            let usage = final_usage
+    match (final_message, final_usage) {
+        (Some(msg), usage) => {
+            let usage = usage
                 .unwrap_or_else(|| ProviderUsage::new("unknown".to_string(), Usage::default()));
             Ok((msg, usage))
         }
-        None => Err(ProviderError::ExecutionError(
+        (None, Some(usage)) => Ok((
+            Message::new(
+                rmcp::model::Role::Assistant,
+                chrono::Utc::now().timestamp(),
+                Vec::new(),
+            ),
+            usage,
+        )),
+        (None, None) => Err(ProviderError::ExecutionError(
             "Stream yielded no message".to_string(),
         )),
     }
@@ -580,17 +595,17 @@ mod tests {
     use super::*;
     use test_case::test_case;
 
-    fn content_from_str(s: String) -> MessageContent {
+    fn content_from_str(s: String) -> MessageContentBlock {
         if let Some(img_data) = s.strip_prefix("*img:") {
-            MessageContent::image(format!("http://example.com/{}", img_data), "image/png")
+            MessageContentBlock::image(format!("http://example.com/{}", img_data), "image/png")
         } else if let Some(tool_name) = s.strip_prefix("*tool:") {
             let tool_call = Ok(
                 rmcp::model::CallToolRequestParams::new(tool_name.to_string())
                     .with_arguments(serde_json::Map::new()),
             );
-            MessageContent::tool_request(format!("tool_{}", tool_name), tool_call)
+            MessageContentBlock::tool_request(format!("tool_{}", tool_name), tool_call)
         } else {
-            MessageContent::text(s)
+            MessageContentBlock::text(s)
         }
     }
 
@@ -613,9 +628,9 @@ mod tests {
         msg.content
             .iter()
             .map(|c| match c {
-                MessageContent::Text(t) => t.text.clone(),
-                MessageContent::Image(_) => "*img".to_string(),
-                MessageContent::ToolRequest(tr) => {
+                MessageContentBlock::Text(t) => t.text.clone(),
+                MessageContentBlock::Image(_) => "*img".to_string(),
+                MessageContentBlock::ToolRequest(tr) => {
                     if let Ok(call) = &tr.tool_call {
                         format!("*tool:{}", call.name)
                     } else {
@@ -661,6 +676,45 @@ mod tests {
         let (msg, usage) = collect_stream(Box::pin(stream)).await.unwrap();
         assert_eq!(content_to_strings(&msg), vec!["Hello"]);
         assert_eq!(usage.model, "unknown");
+    }
+
+    #[tokio::test]
+    async fn test_collect_stream_usage_only_yields_empty_message() {
+        let usage = ProviderUsage::new("claude-sonnet-4".to_string(), Usage::default());
+        let stream = futures::stream::once(async move { Ok((None, Some(usage))) });
+        let (msg, usage) = collect_stream(Box::pin(stream)).await.unwrap();
+        assert!(msg.content.is_empty());
+        assert_eq!(usage.model, "claude-sonnet-4");
+    }
+
+    #[tokio::test]
+    async fn test_collect_stream_no_message_no_usage_errors() {
+        let stream = futures::stream::empty();
+        let result = collect_stream(Box::pin(stream)).await;
+        assert!(matches!(result, Err(ProviderError::ExecutionError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_collect_stream_preserves_text_audience_boundaries() {
+        use futures::stream;
+        use rmcp::model::{Annotations, Role, TextContent};
+
+        let message = |text: &str, audience| {
+            Message::assistant().with_content(MessageContentBlock::Text(
+                TextContent::new(text)
+                    .with_annotations(Annotations::default().with_audience(vec![audience])),
+            ))
+        };
+        let stream = stream::iter([
+            Ok((Some(message("public", Role::User)), None)),
+            Ok((Some(message("private", Role::Assistant)), None)),
+        ]);
+
+        let (message, _) = collect_stream(Box::pin(stream)).await.unwrap();
+
+        assert_eq!(message.content.len(), 2);
+        assert_eq!(message.user_visible_content().as_concat_text(), "public");
+        assert_eq!(message.agent_visible_content().as_concat_text(), "private");
     }
 
     #[test]

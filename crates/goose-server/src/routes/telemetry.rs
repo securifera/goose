@@ -4,12 +4,11 @@ use goose::posthog::emit_event;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use utoipa::ToSchema;
 
 use crate::state::AppState;
 
 #[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize)]
 pub struct TelemetryEventRequest {
     pub event_name: String,
     #[serde(default)]
@@ -17,14 +16,6 @@ pub struct TelemetryEventRequest {
 }
 
 #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))]
-#[utoipa::path(
-    post,
-    path = "/telemetry/event",
-    request_body = TelemetryEventRequest,
-    responses(
-        (status = 202, description = "Event accepted for processing")
-    )
-)]
 async fn send_telemetry_event(
     State(_state): State<Arc<AppState>>,
     Json(request): Json<TelemetryEventRequest>,

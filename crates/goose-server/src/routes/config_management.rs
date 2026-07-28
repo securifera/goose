@@ -28,41 +28,40 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_yaml;
 use std::{collections::HashMap, sync::Arc};
-use utoipa::ToSchema;
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 pub struct ExtensionResponse {
     pub extensions: Vec<ExtensionEntry>,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize)]
 pub struct ExtensionQuery {
     pub name: String,
     pub config: ExtensionConfig,
     pub enabled: bool,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize)]
 pub struct UpsertConfigQuery {
     pub key: String,
     pub value: Value,
     pub is_secret: bool,
 }
 
-#[derive(Deserialize, Serialize, ToSchema)]
+#[derive(Deserialize, Serialize)]
 pub struct ConfigKeyQuery {
     pub key: String,
     pub is_secret: bool,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 pub struct ConfigResponse {
     pub config: HashMap<String, Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ProviderDetails {
     pub name: String,
     pub metadata: ProviderMetadata,
@@ -72,12 +71,12 @@ pub struct ProviderDetails {
     pub saved_model: Option<String>,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 pub struct ProvidersResponse {
     pub providers: Vec<ProviderDetails>,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize)]
 pub struct UpdateCustomProviderRequest {
     pub engine: String,
     pub display_name: String,
@@ -105,24 +104,24 @@ fn normalize_custom_provider_api_key(api_key: String) -> Option<String> {
     (!api_key.is_empty()).then_some(api_key)
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize)]
 pub struct CheckProviderRequest {
     pub provider: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize)]
 pub struct SetProviderRequest {
     pub provider: String,
     pub model: String,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaskedSecret {
     pub masked_value: String,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 #[serde(untagged)]
 pub enum ConfigValueResponse {
     Value(Value),
@@ -130,15 +129,15 @@ pub enum ConfigValueResponse {
 }
 
 pub use goose::providers::provider_secrets::{
-    ProviderSecret, ProviderSecretStatus, ProviderSecretStorage,
+    ProviderSecret,
 };
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct ProviderSecretsResponse {
     pub secrets: Vec<ProviderSecret>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CommandType {
     Builtin,
     Recipe,
@@ -146,26 +145,17 @@ pub enum CommandType {
     Agent,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlashCommand {
     pub command: String,
     pub help: String,
     pub command_type: CommandType,
 }
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 pub struct SlashCommandsResponse {
     pub commands: Vec<SlashCommand>,
 }
 
-#[utoipa::path(
-    post,
-    path = "/config/upsert",
-    request_body = UpsertConfigQuery,
-    responses(
-        (status = 200, description = "Configuration value upserted successfully", body = String),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn upsert_config(
     Json(query): Json<UpsertConfigQuery>,
 ) -> Result<Json<Value>, ErrorResponse> {
@@ -194,16 +184,6 @@ pub async fn upsert_config(
     Ok(Json(Value::String(format!("Upserted key {}", query.key))))
 }
 
-#[utoipa::path(
-    post,
-    path = "/config/remove",
-    request_body = ConfigKeyQuery,
-    responses(
-        (status = 200, description = "Configuration value removed successfully", body = String),
-        (status = 404, description = "Configuration key not found"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn remove_config(
     Json(query): Json<ConfigKeyQuery>,
 ) -> Result<Json<String>, ErrorResponse> {
@@ -242,31 +222,11 @@ fn mask_secret(secret: Value) -> String {
     format!("{}{}", visible, mask)
 }
 
-#[utoipa::path(
-    get,
-    path = "/config/provider-secrets",
-    responses(
-        (status = 200, description = "Provider secrets retrieved successfully", body = ProviderSecretsResponse),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn list_provider_secrets() -> Result<Json<ProviderSecretsResponse>, ErrorResponse> {
     let secrets = goose::providers::provider_secrets::list_provider_secrets().await?;
     Ok(Json(ProviderSecretsResponse { secrets }))
 }
 
-#[utoipa::path(
-    delete,
-    path = "/config/provider-secrets/{id}",
-    params(
-        ("id" = String, Path, description = "Provider secret identifier")
-    ),
-    responses(
-        (status = 200, description = "Provider secret deleted successfully", body = String),
-        (status = 400, description = "Invalid provider secret identifier"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn delete_provider_secret(Path(id): Path<String>) -> Result<Json<String>, ErrorResponse> {
     use goose::providers::provider_secrets::DeleteProviderSecretError;
 
@@ -281,15 +241,6 @@ pub async fn delete_provider_secret(Path(id): Path<String>) -> Result<Json<Strin
     }
 }
 
-#[utoipa::path(
-    post,
-    path = "/config/read",
-    request_body = ConfigKeyQuery,
-    responses(
-        (status = 200, description = "Configuration value retrieved successfully", body = Value),
-        (status = 500, description = "Unable to get the configuration value"),
-    )
-)]
 pub async fn read_config(
     Json(query): Json<ConfigKeyQuery>,
 ) -> Result<Json<ConfigValueResponse>, ErrorResponse> {
@@ -324,14 +275,6 @@ pub async fn read_config(
     Ok(Json(response_value))
 }
 
-#[utoipa::path(
-    get,
-    path = "/config/extensions",
-    responses(
-        (status = 200, description = "All extensions retrieved successfully", body = ExtensionResponse),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn get_extensions() -> Result<Json<ExtensionResponse>, ErrorResponse> {
     let extensions = goose::config::get_all_extensions()
         .into_iter()
@@ -344,17 +287,6 @@ pub async fn get_extensions() -> Result<Json<ExtensionResponse>, ErrorResponse> 
     }))
 }
 
-#[utoipa::path(
-    post,
-    path = "/config/extensions",
-    request_body = ExtensionQuery,
-    responses(
-        (status = 200, description = "Extension added or updated successfully", body = String),
-        (status = 400, description = "Invalid request"),
-        (status = 422, description = "Could not serialize config.yaml"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn add_extension(
     Json(extension_query): Json<ExtensionQuery>,
 ) -> Result<Json<String>, ErrorResponse> {
@@ -375,28 +307,12 @@ pub async fn add_extension(
     }
 }
 
-#[utoipa::path(
-    delete,
-    path = "/config/extensions/{name}",
-    responses(
-        (status = 200, description = "Extension removed successfully", body = String),
-        (status = 404, description = "Extension not found"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn remove_extension(Path(name): Path<String>) -> Result<Json<String>, ErrorResponse> {
     let key = goose::config::extensions::name_to_key(&name);
     goose::config::remove_extension(&key);
     Ok(Json(format!("Removed extension {}", name)))
 }
 
-#[utoipa::path(
-    get,
-    path = "/config",
-    responses(
-        (status = 200, description = "All configuration values retrieved successfully", body = ConfigResponse)
-    )
-)]
 pub async fn read_all_config() -> Result<Json<ConfigResponse>, ErrorResponse> {
     let config = Config::global();
     let values = config
@@ -405,13 +321,6 @@ pub async fn read_all_config() -> Result<Json<ConfigResponse>, ErrorResponse> {
     Ok(Json(ConfigResponse { config: values }))
 }
 
-#[utoipa::path(
-    get,
-    path = "/config/providers",
-    responses(
-        (status = 200, description = "All configuration values retrieved successfully", body = [ProviderDetails])
-    )
-)]
 pub async fn providers() -> Result<Json<Vec<ProviderDetails>>, ErrorResponse> {
     let config = Config::global();
     let providers = get_providers().await;
@@ -436,19 +345,6 @@ pub async fn providers() -> Result<Json<Vec<ProviderDetails>>, ErrorResponse> {
     Ok(Json(providers_response))
 }
 
-#[utoipa::path(
-    get,
-    path = "/config/providers/{name}/models",
-    params(
-        ("name" = String, Path, description = "Provider name (e.g., openai)")
-    ),
-    responses(
-        (status = 200, description = "Models fetched successfully", body = [ModelInfo]),
-        (status = 400, description = "Unknown provider, provider not configured, or authentication error"),
-        (status = 429, description = "Rate limit exceeded"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn get_provider_models(
     Path(name): Path<String>,
 ) -> Result<Json<Vec<ModelInfo>>, ErrorResponse> {
@@ -478,7 +374,7 @@ pub async fn get_provider_models(
     }
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize)]
 pub struct ProviderModelInfoQuery {
     pub model: String,
 }
@@ -525,20 +421,6 @@ pub async fn resolve_provider_model_info(
     }
 }
 
-#[utoipa::path(
-    post,
-    path = "/config/providers/{name}/model-info",
-    params(
-        ("name" = String, Path, description = "Provider name (e.g., openai)")
-    ),
-    request_body = ProviderModelInfoQuery,
-    responses(
-        (status = 200, description = "Model metadata fetched successfully", body = ModelInfo),
-        (status = 400, description = "Unknown provider, provider not configured, or authentication error"),
-        (status = 429, description = "Rate limit exceeded"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn get_provider_model_info(
     Path(name): Path<String>,
     Json(query): Json<ProviderModelInfoQuery>,
@@ -548,20 +430,12 @@ pub async fn get_provider_model_info(
         .map(Json)
 }
 
-#[derive(Deserialize, utoipa::IntoParams)]
+#[derive(Deserialize)]
 pub struct SlashCommandsQuery {
     /// Optional working directory to discover local skills from
     pub working_dir: Option<String>,
 }
 
-#[utoipa::path(
-    get,
-    path = "/config/slash_commands",
-    params(SlashCommandsQuery),
-    responses(
-        (status = 200, description = "Slash commands retrieved successfully", body = SlashCommandsResponse)
-    )
-)]
 pub async fn get_slash_commands(
     axum::extract::Query(query): axum::extract::Query<SlashCommandsQuery>,
 ) -> Result<Json<SlashCommandsResponse>, ErrorResponse> {
@@ -613,7 +487,7 @@ pub async fn get_slash_commands(
     Ok(Json(SlashCommandsResponse { commands }))
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 pub struct ModelInfoData {
     pub provider: String,
     pub model: String,
@@ -627,26 +501,18 @@ pub struct ModelInfoData {
     pub currency: String,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 pub struct ModelInfoResponse {
     pub model_info: Option<ModelInfoData>,
     pub source: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize)]
 pub struct ModelInfoQuery {
     pub provider: String,
     pub model: String,
 }
 
-#[utoipa::path(
-    post,
-    path = "/config/canonical-model-info",
-    request_body = ModelInfoQuery,
-    responses(
-        (status = 200, description = "Model information retrieved successfully", body = ModelInfoResponse)
-    )
-)]
 pub async fn get_canonical_model_info(
     Json(query): Json<ModelInfoQuery>,
 ) -> Json<ModelInfoResponse> {
@@ -674,14 +540,6 @@ pub async fn get_canonical_model_info(
     })
 }
 
-#[utoipa::path(
-    get,
-    path = "/config/validate",
-    responses(
-        (status = 200, description = "Config validation result", body = String),
-        (status = 422, description = "Config file is corrupted")
-    )
-)]
 pub async fn validate_config() -> Result<Json<String>, ErrorResponse> {
     let config_path = Paths::config_dir().join("config.yaml");
 
@@ -695,21 +553,11 @@ pub async fn validate_config() -> Result<Json<String>, ErrorResponse> {
 
     Ok(Json("Config file is valid".to_string()))
 }
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 pub struct CreateCustomProviderResponse {
     pub provider_name: String,
 }
 
-#[utoipa::path(
-    post,
-    path = "/config/custom-providers",
-    request_body = UpdateCustomProviderRequest,
-    responses(
-        (status = 200, description = "Custom provider created successfully", body = CreateCustomProviderResponse),
-        (status = 400, description = "Invalid request"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn create_custom_provider(
     Json(request): Json<UpdateCustomProviderRequest>,
 ) -> Result<Json<CreateCustomProviderResponse>, ErrorResponse> {
@@ -736,15 +584,6 @@ pub async fn create_custom_provider(
     }))
 }
 
-#[utoipa::path(
-    get,
-    path = "/config/custom-providers/{id}",
-    responses(
-        (status = 200, description = "Custom provider retrieved successfully", body = LoadedProvider),
-        (status = 404, description = "Provider not found"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn get_custom_provider(
     Path(id): Path<String>,
 ) -> Result<Json<LoadedProvider>, ErrorResponse> {
@@ -756,15 +595,6 @@ pub async fn get_custom_provider(
     Ok(Json(loaded_provider))
 }
 
-#[utoipa::path(
-    delete,
-    path = "/config/custom-providers/{id}",
-    responses(
-        (status = 200, description = "Custom provider removed successfully", body = String),
-        (status = 404, description = "Provider not found"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn remove_custom_provider(Path(id): Path<String>) -> Result<Json<String>, ErrorResponse> {
     goose::config::declarative_providers::remove_custom_provider(&id)?;
 
@@ -773,17 +603,6 @@ pub async fn remove_custom_provider(Path(id): Path<String>) -> Result<Json<Strin
     Ok(Json(format!("Removed custom provider: {}", id)))
 }
 
-#[utoipa::path(
-    post,
-    path = "/config/providers/{name}/cleanup",
-    params(
-        ("name" = String, Path, description = "Provider name (e.g., githubcopilot)")
-    ),
-    responses(
-        (status = 200, description = "Provider cache cleaned up successfully", body = String),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn cleanup_provider_cache(
     Path(name): Path<String>,
 ) -> Result<Json<String>, ErrorResponse> {
@@ -791,16 +610,6 @@ pub async fn cleanup_provider_cache(
     Ok(Json(format!("Cleaned up provider cache: {}", name)))
 }
 
-#[utoipa::path(
-    put,
-    path = "/config/custom-providers/{id}",
-    request_body = UpdateCustomProviderRequest,
-    responses(
-        (status = 200, description = "Custom provider updated successfully", body = String),
-        (status = 404, description = "Provider not found"),
-        (status = 500, description = "Internal server error")
-    )
-)]
 pub async fn update_custom_provider(
     Path(id): Path<String>,
     Json(request): Json<UpdateCustomProviderRequest>,
@@ -827,11 +636,6 @@ pub async fn update_custom_provider(
     Ok(Json(format!("Updated custom provider: {}", id)))
 }
 
-#[utoipa::path(
-    post,
-    path = "/config/check_provider",
-    request_body = CheckProviderRequest,
-)]
 pub async fn check_provider(
     Json(CheckProviderRequest { provider }): Json<CheckProviderRequest>,
 ) -> Result<(), ErrorResponse> {
@@ -843,11 +647,6 @@ pub async fn check_provider(
     Ok(())
 }
 
-#[utoipa::path(
-    post,
-    path = "/config/set_provider",
-    request_body = SetProviderRequest,
-)]
 pub async fn set_config_provider(
     Json(SetProviderRequest { provider, model }): Json<SetProviderRequest>,
 ) -> Result<(), ErrorResponse> {
@@ -867,17 +666,6 @@ pub async fn set_config_provider(
     Ok(())
 }
 
-#[utoipa::path(
-    get,
-    path = "/config/provider-catalog",
-    params(
-        ("format" = Option<String>, Query, description = "Filter by provider format (openai, anthropic, ollama)")
-    ),
-    responses(
-        (status = 200, description = "Provider catalog retrieved successfully", body = [ProviderCatalogEntry]),
-        (status = 400, description = "Invalid format parameter")
-    )
-)]
 pub async fn get_provider_catalog(
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<ProviderCatalogEntry>>, ErrorResponse> {
@@ -894,17 +682,6 @@ pub async fn get_provider_catalog(
     Ok(Json(providers))
 }
 
-#[utoipa::path(
-    get,
-    path = "/config/provider-catalog/{id}",
-    params(
-        ("id" = String, Path, description = "Provider ID from models.dev")
-    ),
-    responses(
-        (status = 200, description = "Provider template retrieved successfully", body = ProviderTemplate),
-        (status = 404, description = "Provider not found in catalog")
-    )
-)]
 pub async fn get_provider_catalog_template(
     Path(id): Path<String>,
 ) -> Result<Json<ProviderTemplate>, ErrorResponse> {

@@ -8,14 +8,13 @@ use goose::prompt_template::{
     get_template, list_templates, reset_template, save_template, Template,
 };
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 pub struct PromptsListResponse {
     pub prompts: Vec<Template>,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 pub struct PromptContentResponse {
     pub name: String,
     pub content: String,
@@ -23,35 +22,17 @@ pub struct PromptContentResponse {
     pub is_customized: bool,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize)]
 pub struct SavePromptRequest {
     pub content: String,
 }
 
-#[utoipa::path(
-    get,
-    path = "/config/prompts",
-    responses(
-        (status = 200, description = "List of all available prompts", body = PromptsListResponse)
-    )
-)]
 pub async fn get_prompts() -> Json<PromptsListResponse> {
     Json(PromptsListResponse {
         prompts: list_templates(),
     })
 }
 
-#[utoipa::path(
-    get,
-    path = "/config/prompts/{name}",
-    params(
-        ("name" = String, Path, description = "Prompt template name (e.g., system.md)")
-    ),
-    responses(
-        (status = 200, description = "Prompt content retrieved successfully", body = PromptContentResponse),
-        (status = 404, description = "Prompt not found")
-    )
-)]
 pub async fn get_prompt(
     Path(name): Path<String>,
 ) -> Result<Json<PromptContentResponse>, ErrorResponse> {
@@ -71,19 +52,6 @@ pub async fn get_prompt(
     }))
 }
 
-#[utoipa::path(
-    put,
-    path = "/config/prompts/{name}",
-    params(
-        ("name" = String, Path, description = "Prompt template name (e.g., system.md)")
-    ),
-    request_body = SavePromptRequest,
-    responses(
-        (status = 200, description = "Prompt saved successfully", body = String),
-        (status = 404, description = "Prompt not found"),
-        (status = 500, description = "Failed to save prompt")
-    )
-)]
 pub async fn save_prompt(
     Path(name): Path<String>,
     Json(request): Json<SavePromptRequest>,
@@ -99,18 +67,6 @@ pub async fn save_prompt(
     Ok(Json(format!("Saved prompt: {}", name)))
 }
 
-#[utoipa::path(
-    delete,
-    path = "/config/prompts/{name}",
-    params(
-        ("name" = String, Path, description = "Prompt template name (e.g., system.md)")
-    ),
-    responses(
-        (status = 200, description = "Prompt reset to default successfully", body = String),
-        (status = 404, description = "Prompt not found"),
-        (status = 500, description = "Failed to reset prompt")
-    )
-)]
 pub async fn reset_prompt(Path(name): Path<String>) -> Result<Json<String>, ErrorResponse> {
     reset_template(&name).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {

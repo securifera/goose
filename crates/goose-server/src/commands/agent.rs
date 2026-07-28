@@ -4,7 +4,7 @@ use anyhow::Result;
 use axum::middleware;
 use axum_server::Handle;
 use goose::acp::server_factory::{AcpServer, AcpServerFactoryConfig};
-use goose::acp::transport::create_authenticated_acp_router;
+use goose::acp::transport::create_acp_router;
 use goose::agents::GoosePlatform;
 use goose::config::paths::Paths;
 use goose_server::auth::check_token;
@@ -70,7 +70,6 @@ pub async fn run() -> Result<()> {
         config_dir: Paths::config_dir(),
         goose_platform: GoosePlatform::GooseDesktop,
         additional_source_roots: Vec::new(),
-        scheduler: Some(app_state.scheduler()),
     }));
 
     let rest_router = crate::routes::configure(app_state.clone(), secret_key.clone())
@@ -79,7 +78,13 @@ pub async fn run() -> Result<()> {
             check_token,
         ))
         .layer(cors);
-    let acp_router = create_authenticated_acp_router(acp_server, secret_key.clone());
+    // upstream removed create_authenticated_acp_router; compose the bare ACP
+    // router with goosed's own token middleware (create_router would also mount
+    // /health + /status, colliding with the REST router's /status).
+    let acp_router = create_acp_router(acp_server).layer(middleware::from_fn_with_state(
+        secret_key.clone(),
+        check_token,
+    ));
 
     let app = rest_router.merge(acp_router);
 

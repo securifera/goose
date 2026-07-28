@@ -6,9 +6,8 @@ use axum::{
 use goose::config::ConfigError;
 use goose_providers::errors::ProviderError;
 use serde::Serialize;
-use utoipa::ToSchema;
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub message: String,
     #[serde(skip)]

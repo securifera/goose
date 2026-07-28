@@ -15,18 +15,16 @@ use goose::recipe::validate_recipe::validate_recipe_template_from_content;
 use goose::recipe::Recipe;
 use serde::Serialize;
 use tracing::error;
-use utoipa::ToSchema;
 
 pub struct RecipeValidationError {
     pub status: StatusCode,
     pub message: String,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct RecipeManifest {
     pub id: String,
     pub recipe: Recipe,
-    #[schema(value_type = String)]
     pub file_path: PathBuf,
     pub last_modified: String,
     pub schedule_cron: Option<String>,

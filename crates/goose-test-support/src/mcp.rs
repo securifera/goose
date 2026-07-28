@@ -1,8 +1,9 @@
 use crate::session::SESSION_ID_HEADER;
 use crate::ExpectedSessionId;
 use rmcp::model::{
-    CallToolResult, ClientNotification, ClientRequest, Content, ErrorCode, Implementation,
-    InitializeResult, Meta, ProtocolVersion, ServerCapabilities, ServerInfo,
+    Annotations, CallToolResult, ClientNotification, ClientRequest, ContentBlock, ErrorCode,
+    Implementation, InitializeResult, Meta, ProtocolVersion, Role, ServerCapabilities, ServerInfo,
+    TextContent,
 };
 use rmcp::service::{DynService, NotificationContext, RequestContext, ServiceExt, ServiceRole};
 use rmcp::transport::streamable_http_server::{
@@ -98,15 +99,29 @@ impl McpFixtureServer {
 
     #[tool(description = "Get the code", annotations(read_only_hint = true))]
     fn get_code(&self) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::success(vec![Content::text(FAKE_CODE)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(FAKE_CODE)]))
     }
 
     #[tool(description = "Get an image")]
     fn get_image(&self) -> Result<CallToolResult, McpError> {
-        Ok(CallToolResult::success(vec![Content::image(
+        Ok(CallToolResult::success(vec![ContentBlock::image(
             TEST_IMAGE_B64,
             "image/png",
         )]))
+    }
+
+    #[tool(
+        description = "Get audience-scoped content",
+        annotations(read_only_hint = true)
+    )]
+    fn get_audience_content(&self) -> Result<CallToolResult, McpError> {
+        Ok(CallToolResult::success(vec![
+            ContentBlock::text("visible"),
+            ContentBlock::Text(
+                TextContent::new("provider-only")
+                    .with_annotations(Annotations::default().with_audience(vec![Role::Assistant])),
+            ),
+        ]))
     }
 }
 
@@ -116,7 +131,7 @@ impl ServerHandler for McpFixtureServer {
         InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2025_03_26)
             .with_server_info(Implementation::new("mcp-fixture", "1.0.0"))
-            .with_instructions("Test server with get_code and get_image tools.")
+            .with_instructions("Test server with code, image, and audience-scoped content tools.")
     }
 }
 

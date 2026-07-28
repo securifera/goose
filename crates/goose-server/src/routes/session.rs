@@ -15,28 +15,27 @@ use goose::session::{EnabledExtensionsState, Session};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use utoipa::ToSchema;
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSessionNameRequest {
     /// Updated name for the session (max 200 characters)
     name: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateSessionUserRecipeValuesRequest {
     /// Recipe parameter values entered by the user
     user_recipe_values: HashMap<String, String>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize)]
 pub struct UpdateSessionUserRecipeValuesResponse {
     recipe: Recipe,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForkRequest {
     timestamp: Option<i64>,
@@ -44,7 +43,7 @@ pub struct ForkRequest {
     copy: bool,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForkResponse {
     session_id: String,
@@ -52,23 +51,6 @@ pub struct ForkResponse {
 
 const MAX_NAME_LENGTH: usize = 200;
 
-#[utoipa::path(
-    get,
-    path = "/sessions/{session_id}",
-    params(
-        ("session_id" = String, Path, description = "Unique identifier for the session")
-    ),
-    responses(
-        (status = 200, description = "Session history retrieved successfully", body = Session),
-        (status = 401, description = "Unauthorized - Invalid or missing API key"),
-        (status = 404, description = "Session not found"),
-        (status = 500, description = "Internal server error")
-    ),
-    security(
-        ("api_key" = [])
-    ),
-    tag = "Session Management"
-)]
 async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -82,25 +64,6 @@ async fn get_session(
     Ok(Json(session))
 }
 
-#[utoipa::path(
-    put,
-    path = "/sessions/{session_id}/name",
-    request_body = UpdateSessionNameRequest,
-    params(
-        ("session_id" = String, Path, description = "Unique identifier for the session")
-    ),
-    responses(
-        (status = 200, description = "Session name updated successfully"),
-        (status = 400, description = "Bad request - Name too long (max 200 characters)"),
-        (status = 401, description = "Unauthorized - Invalid or missing API key"),
-        (status = 404, description = "Session not found"),
-        (status = 500, description = "Internal server error")
-    ),
-    security(
-        ("api_key" = [])
-    ),
-    tag = "Session Management"
-)]
 async fn update_session_name(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -125,24 +88,6 @@ async fn update_session_name(
     Ok(StatusCode::OK)
 }
 
-#[utoipa::path(
-    put,
-    path = "/sessions/{session_id}/user_recipe_values",
-    request_body = UpdateSessionUserRecipeValuesRequest,
-    params(
-        ("session_id" = String, Path, description = "Unique identifier for the session")
-    ),
-    responses(
-        (status = 200, description = "Session user recipe values updated successfully", body = UpdateSessionUserRecipeValuesResponse),
-        (status = 401, description = "Unauthorized - Invalid or missing API key"),
-        (status = 404, description = "Session not found", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
-    ),
-    security(
-        ("api_key" = [])
-    ),
-    tag = "Session Management"
-)]
 // Update session user recipe parameter values
 async fn update_session_user_recipe_values(
     State(state): State<Arc<AppState>>,
@@ -201,25 +146,6 @@ async fn update_session_user_recipe_values(
     }
 }
 
-#[utoipa::path(
-    post,
-    path = "/sessions/{session_id}/fork",
-    request_body = ForkRequest,
-    params(
-        ("session_id" = String, Path, description = "Unique identifier for the session")
-    ),
-    responses(
-        (status = 200, description = "Session forked successfully", body = ForkResponse),
-        (status = 400, description = "Bad request - truncate=true requires timestamp"),
-        (status = 401, description = "Unauthorized - Invalid or missing API key"),
-        (status = 404, description = "Session not found"),
-        (status = 500, description = "Internal server error")
-    ),
-    security(
-        ("api_key" = [])
-    ),
-    tag = "Session Management"
-)]
 async fn fork_session(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
@@ -294,29 +220,12 @@ async fn fork_session(
     }))
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionExtensionsResponse {
     extensions: Vec<ExtensionConfig>,
 }
 
-#[utoipa::path(
-    get,
-    path = "/sessions/{session_id}/extensions",
-    params(
-        ("session_id" = String, Path, description = "Unique identifier for the session")
-    ),
-    responses(
-        (status = 200, description = "Session extensions retrieved successfully", body = SessionExtensionsResponse),
-        (status = 401, description = "Unauthorized - Invalid or missing API key"),
-        (status = 404, description = "Session not found"),
-        (status = 500, description = "Internal server error")
-    ),
-    security(
-        ("api_key" = [])
-    ),
-    tag = "Session Management"
-)]
 async fn get_session_extensions(
     State(state): State<Arc<AppState>>,
     Path(session_id): Path<String>,
