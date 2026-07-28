@@ -5299,6 +5299,7 @@ dependencies = [
  "chrono",
  "clap",
  "config",
+ "env-lock",
  "futures",
  "goose",
  "goose-mcp",

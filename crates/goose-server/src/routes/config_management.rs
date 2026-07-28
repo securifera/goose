@@ -128,9 +128,7 @@ pub enum ConfigValueResponse {
     MaskedValue(MaskedSecret),
 }
 
-pub use goose::providers::provider_secrets::{
-    ProviderSecret,
-};
+pub use goose::providers::provider_secrets::ProviderSecret;
 
 #[derive(Debug, Serialize)]
 pub struct ProviderSecretsResponse {
